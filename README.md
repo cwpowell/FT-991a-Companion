@@ -74,6 +74,22 @@ The panel needs only Python 3 and tkinter. The Audio tab also needs `sounddevice
 put a 64-bit `opus.dll` next to `ft991a_panel.py` to use Opus. The panel remembers its settings in
 `~/.ft991a_panel.json`.
 
+## Installers (no Python needed)
+
+Ready-to-run versions are built by GitHub's own machines, because a Mac app can only be built on a
+Mac and a Windows program only on Windows. Open the **Actions** tab, choose **Build installers**
+and click **Run workflow**. It builds, and puts the results in these folders:
+
+- `MacOS/`: `ft-991a-apple-silicon.dmg` and `ft-991a-intel.dmg`.
+- `Windows/`: `FT-991A-Panel-Setup.exe` (installer) and `FT-991A-Panel.exe` (program on its own).
+
+Each folder has a README with the details, including how to get past the first-start warnings from
+macOS and Windows (the apps are not signed). Every build checks itself before it is published: the
+program starts and reports whether Tk, the sound library and Opus are really inside it.
+
+You can also build on your own computer: `bash packaging/build_macos.sh` or
+`packaging\build_windows.bat`.
+
 ## Files
 
 | File | Runs on | What it is |
@@ -89,6 +105,10 @@ put a 64-bit `opus.dll` next to `ft991a_panel.py` to use Opus. The panel remembe
 | `wavstat.py` | any | Summarises a bridge debug WAV file: level, continuity and tone frequency. |
 | `fake_ft991a.py` | any | A simulated FT-991A for the raw CAT connection. |
 | `fake_rigctld.py` | any | A simulated `rigctld`. |
+| `Contributions/` | | `opus.dll`, a 64-bit build of the Opus codec library (libopus 1.6.1) for Windows, with its readme. The Windows program and installer use it. |
+| `packaging/` | | The recipe and build scripts for the macOS and Windows installers. |
+| `.github/workflows/build.yml` | GitHub | Builds the installers. |
+| `MacOS/`, `Windows/` | | The finished installers, once built. |
 
 The server and the panel speak the same audio protocol, so either can be updated on its own.
 

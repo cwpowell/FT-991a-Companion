@@ -77,13 +77,58 @@ try:
 except Exception as _exc:             # sounddevice is not installed, or PortAudio is missing
     sd, AUDIO_OK, AUDIO_ERR = None, False, _exc
 
+def _app_dirs():
+    """Folders where a library kept with the program may be: beside the packaged program, inside
+    the packaged app, and beside this file. The first one has priority, so a newer opus.dll that
+    you drop next to the program wins over the copy built into it."""
+    dirs = []
+    if getattr(sys, "frozen", False):                  # packaged with PyInstaller
+        exe_dir = os.path.dirname(sys.executable)
+        dirs += [exe_dir, getattr(sys, "_MEIPASS", None),
+                 os.path.join(exe_dir, os.pardir, "Frameworks"),
+                 os.path.join(exe_dir, os.pardir, "Resources")]
+    dirs.append(os.path.dirname(os.path.abspath(__file__)))
+    out = []
+    for d in dirs:
+        if d and os.path.isdir(d) and os.path.abspath(d) not in out:
+            out.append(os.path.abspath(d))
+    return out
+
+
+def _find_bundled_opus(dirs=None, platform=None):
+    """Path of an Opus library that was shipped with the program, or None."""
+    names = {"win32": ("opus.dll", "libopus-0.dll"),
+             "darwin": ("libopus.0.dylib", "libopus.dylib")}.get(platform or sys.platform,
+                                                                ("libopus.so.0",))
+    for d in (_app_dirs() if dirs is None else dirs):
+        for name in names:
+            path = os.path.join(d, name)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+_bundled_opus = _find_bundled_opus()
 if sys.platform == "win32":
-    # opuslib finds the DLL by searching PATH, which does not include the
-    # script's own folder, so add it. This lets opus.dll sit beside this script.
-    _here = os.path.dirname(os.path.abspath(__file__))
-    os.environ["PATH"] = _here + os.pathsep + os.environ.get("PATH", "")
-    if hasattr(os, "add_dll_directory"):
-        os.add_dll_directory(_here)
+    # opuslib finds the DLL by searching PATH, which does not include the program's own
+    # folder, so add the folders from _app_dirs() (the first one ends up first on PATH).
+    for _d in reversed(_app_dirs()):
+        os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(_d)
+            except OSError:
+                pass
+elif _bundled_opus:
+    # macOS app: opuslib asks ctypes.util.find_library("opus"), which knows nothing about the
+    # app's own folders, so answer that one question with the library that came with the app.
+    import ctypes.util
+    _real_find_library = ctypes.util.find_library
+
+    def _find_library(name, _real=_real_find_library, _path=_bundled_opus):
+        return _path if name == "opus" else _real(name)
+
+    ctypes.util.find_library = _find_library
 
 try:
     import opuslib
@@ -3445,13 +3490,58 @@ class Panel:
             self.texts["alc"].set("--")
 
 
+def run_selftest(path):
+    """Write a short report of what this (packaged) program can see: Tk, the sound library and
+    the Opus library. A build runs it to prove that everything was really bundled. Returns the
+    exit code: 1 if anything failed."""
+    rows = []
+
+    def check(name, fn):
+        try:
+            rows.append(("OK  ", name, str(fn())))
+        except Exception as exc:
+            rows.append(("FAIL", name, f"{type(exc).__name__}: {exc}"))
+
+    def need(ok, why):
+        if not ok:
+            raise RuntimeError(why)
+
+    check("python", lambda: f"{sys.version.split()[0]} on {sys.platform}, "
+                            f"packaged={bool(getattr(sys, 'frozen', False))}")
+    check("tkinter and Tcl", lambda: "Tcl " + tk.Tcl().eval("info patchlevel"))
+
+    def sound():
+        need(AUDIO_OK, AUDIO_ERR)
+        return f"sounddevice {sd.__version__}, {sd.get_portaudio_version()[1]}"
+
+    def opus():
+        need(HAVE_OPUS, OPUS_ERR)
+        version = opuslib.api.info.get_version_string()
+        if isinstance(version, bytes):
+            version = version.decode("ascii", "replace")
+        return f"{version} (shipped with the program: {_bundled_opus or 'no, using the system copy'})"
+
+    check("sounddevice and PortAudio", sound)
+    check("Opus library", opus)
+    text = "\n".join(f"{status} {name}: {detail}" for status, name, detail in rows) + "\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(text, end="")
+    return 1 if any(status == "FAIL" for status, _, _ in rows) else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="FT-991A remote panel")
     ap.add_argument("--host", help="server host (connects immediately)")
     ap.add_argument("--port", type=int, help="TCP port: rigctld (default 4532) or the ser2net port")
     ap.add_argument("--backend", choices=("hamlib", "cat"),
                     help="hamlib = rigctld (default); cat = raw Yaesu CAT through ser2net")
+    ap.add_argument("--selftest", metavar="FILE",
+                    help="check that Tk, the sound library and Opus are present, write the "
+                         "report to FILE and exit (used by the installer builds)")
     args = ap.parse_args()
+    if args.selftest:
+        return run_selftest(args.selftest)
     root = tk.Tk()
 
     def show_error(exc_type, exc, tb):

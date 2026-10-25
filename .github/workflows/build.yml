@@ -1,0 +1,130 @@
+name: Build installers
+
+# Builds the macOS disk images (Apple Silicon and Intel) and the Windows program and installer
+# on GitHub's own machines, because each can only be built on its own kind of computer.
+#
+# Run it from the Actions tab: "Build installers", then "Run workflow".
+# Or push a tag such as v1.0.0 to build and draft a release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number for the installers"
+        required: true
+        default: "1.0.0"
+      commit_files:
+        description: "Also commit the built files into the MacOS and Windows folders"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14            # Apple Silicon
+            label: apple-silicon
+          - os: macos-15-intel      # Intel (GitHub retires Intel Mac runners in fall 2027)
+            label: intel
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Version number
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version || github.ref_name }}"
+          echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
+      - name: Build the app and the disk image
+        run: bash packaging/build_macos.sh
+      - name: Self-test report
+        if: always()
+        run: cat "build/selftest-${{ matrix.label }}.txt" || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.label }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Version number
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version || github.ref_name }}"
+          echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Build the program and the installer
+        shell: cmd
+        run: packaging\build_windows.bat
+      - name: Self-test report
+        if: always()
+        shell: bash
+        run: cat build/selftest.txt || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: |
+            dist/FT-991A-Panel.exe
+            dist/FT-991A-Panel-Setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: Collect the files
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Version number
+        run: |
+          V="${{ github.event.inputs.version || github.ref_name }}"
+          echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
+      - name: Put the files in the MacOS and Windows folders
+        if: github.event_name == 'workflow_dispatch' && inputs.commit_files
+        run: |
+          set -e
+          ls -l artifacts
+          mkdir -p MacOS Windows
+          cp artifacts/*.dmg MacOS/
+          cp artifacts/FT-991A-Panel.exe artifacts/FT-991A-Panel-Setup.exe Windows/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MacOS Windows
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit."
+          else
+            git commit -m "Add installers for version $PANEL_VERSION"
+            git pull --rebase origin "${{ github.ref_name }}"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+      - name: Draft a release with the files attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$PANEL_VERSION"
+          gh release create "$TAG" artifacts/* --draft \
+            --title "FT-991A Panel $PANEL_VERSION" \
+            --notes "Installers for macOS (Apple Silicon and Intel) and Windows." \
+            || gh release upload "$TAG" artifacts/* --clobber
