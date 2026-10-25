@@ -1,0 +1,6 @@
+# The panel's Radio tab needs only Python 3 and tkinter.
+# These are for the Audio tab and the audio bridge:
+sounddevice
+
+# Optional, for the Opus codec. It also needs the Opus library (libopus; opus.dll on Windows).
+opuslib

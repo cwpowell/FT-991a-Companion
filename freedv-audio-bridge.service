@@ -1,0 +1,49 @@
+# FreeDV audio bridge: the server side, running in the background on the radio's computer.
+#
+# Install (as the user who is logged in to the desktop and owns the radio's sound devices):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp freedv-audio-bridge.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now freedv-audio-bridge
+#   loginctl enable-linger "$USER"          # keep it running when you are not logged in
+#
+# Watch it:   journalctl --user -u freedv-audio-bridge -f
+# Stop it:    systemctl --user stop freedv-audio-bridge
+#
+# Before you start it, close the bridge window (freedv_audio_bridge_gui.py) and any other copy
+# of the bridge: only one program can use UDP port 5800.
+#
+# Edit the three things marked CHANGE:
+
+[Unit]
+Description=FreeDV audio bridge (server)
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+
+# CHANGE 1: the Python that runs the bridge by hand (a virtualenv's python if you use one),
+#           and where freedv_audio_bridge.py is (%h is your home folder).
+# CHANGE 2: replace YOUR-TAILSCALE-ADDRESS with this computer's Tailscale address (tailscale ip -4), so the bridge is reachable only over
+#           the tailnet (the bridge has no password of its own).
+# CHANGE 3: --in-dev and --out-dev are the radio's USB audio devices. A name substring is better
+#           than a number, because the numbers can change between boots. Check the names with:
+#               python3 freedv_audio_bridge.py list
+#
+# --wait    start before the radio is on, and recover by itself when the radio is switched off
+#           and on again (the bridge notices that its audio stopped and starts again)
+# --out-gain-db -9    the audio level sent to the radio, which sets the transmit drive
+ExecStart=/usr/bin/python3 %h/freedv_audio_bridge.py server \
+    --bind YOUR-TAILSCALE-ADDRESS --port 5800 \
+    --in-dev alsa_input.usb-Burr-Brown --out-dev alsa_output.usb-Burr-Brown \
+    --rate 48000 --frame-ms 10 --jitter-ms 110 --out-gain-db -9 \
+    --codec pcm --wait
+
+# If the Tailscale address does not exist yet at boot, the bridge cannot bind, exits, and is
+# started again every 5 seconds until it can.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+# debug recordings written by the bridge's --dump-play / --dump-capture options
+*.wav
