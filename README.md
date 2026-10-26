@@ -1,6 +1,6 @@
-<p align="center"><img src="docs/img/icon.png" width="128" alt="FT-991A Panel icon"></p>
+<p align="center"><img src="Images/icon.png" width="128" alt="FT-991A Companion icon"></p>
 
-# FT-991A remote station
+# FT-991A Companion
 
 Tools for operating a Yaesu FT-991A from another computer over a network such as
 [Tailscale](https://tailscale.com), or from the same computer:
@@ -11,7 +11,7 @@ Tools for operating a Yaesu FT-991A from another computer over a network such as
 
 | Radio tab | Audio tab | Settings tab |
 | --- | --- | --- |
-| ![Radio tab](docs/img/panel-radio.png) | ![Audio tab](docs/img/panel-audio.png) | ![Settings tab](docs/img/panel-settings.png) |
+| ![Radio tab](Images/panel-radio.png) | ![Audio tab](Images/panel-audio.png) | ![Settings tab](docs/img/panel-settings.png) |
 
 The screenshots were taken against the simulated radio in this repository.
 

@@ -16,7 +16,7 @@ on:
       commit_files:
         description: "Also commit the built files into the MacOS and Windows folders"
         type: boolean
-        default: true
+        default: false
   push:
     tags: ["v*"]
 
