@@ -37,7 +37,8 @@ a = Analysis(
     binaries=binaries,
     datas=[],
     hiddenimports=[],
-    excludes=["numpy", "matplotlib", "scipy", "pandas", "PIL"],   # not used; keeps the app smaller
+    # numpy is needed (noise reduction); these are not, and leaving them out keeps the app smaller
+    excludes=["matplotlib", "scipy", "pandas", "PIL"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
