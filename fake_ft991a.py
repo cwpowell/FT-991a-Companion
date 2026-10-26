@@ -36,6 +36,7 @@ class Sim:
         self.alc_level = 40      # ALC reading while transmitting: audio is reaching the radio (0 = none)
         self.menu_raw = {}       # menu number -> raw value text; a test fills in the items it needs
         self.menu_reject = set()  # menu numbers whose writes the radio ignores (for tests)
+        self.s_for = None         # optional: a function frequency -> S meter reading (for tests)
         self.agc = 3             # GT: 0 off, 1 fast, 2 mid, 3 slow, 4 auto (answers may be 4-6)
         self.af = 100            # AG: 0-255 receive volume
         self.menu = {m: 50 for m in ("046", "054", "073", "075", "078", "099", "107")}  # transmit levels
@@ -73,6 +74,8 @@ class Sim:
         if which == "4":   # ALC
             return int(self.alc_level + random.uniform(0, 6)) if transmitting else 0
         if which == "1":   # S meter
+            if self.s_for is not None:                  # a test can make it depend on the frequency
+                return 0 if transmitting else int(self.s_for(self.freq) + random.uniform(-2, 2))
             return int(100 + random.uniform(-10, 10)) if not transmitting else 0
         if which == "8":   # VDD
             return 150

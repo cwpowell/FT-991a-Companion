@@ -1,6 +1,27 @@
 # Changelog
 
+## 1.0.3
+
+- **Noise reduction** on the Audio tab: a check box, a level from 1 to 20, and an **Auto-calibrate**
+  button. It is spectral subtraction (Boll, with Berouti's over-subtraction and spectral floor and
+  smoothing against "musical noise") applied to the audio that goes to your speakers. The cable that
+  FreeDV reads is never touched. It takes about 1% of one processor core.
+- Auto-calibrate retunes VFO A to a quiet frequency beside the one you are on (a carrier, a whistle,
+  speech, static and fading are all recognised and skipped), measures the noise there for four
+  seconds, tunes the subtraction to the level and to how steady the noise is, and retunes to your
+  frequency. The speakers are silent while it runs, PTT and Tune are refused, and anything unexpected
+  puts the radio back first.
+- It needs numpy (`pip install numpy`). Without numpy the rest of the panel works and the noise
+  reduction controls are greyed out. The Mac and Windows installers include it, which makes them
+  larger.
+- The self-test (`--selftest`) now also runs the noise reduction.
+
 ## 1.0.2
+
+**Repository**
+
+- The user manual is a PDF in `Documentation/`, and the screenshots are in `Images/` (both at the top
+  level, replacing `docs/` and `docs/img/`).
 
 **Panel**
 

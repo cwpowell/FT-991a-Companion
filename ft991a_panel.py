@@ -45,7 +45,7 @@ opuslib for Opus).   python3 ft991a_panel.py [--host H --port P]
 Meter values come from Hamlib's own calibration tables. If your wattmeter disagrees, use
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
-__version__ = "1.0.2"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.0.3"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -441,6 +441,7 @@ class Node:
         self.in_peak = 0   # peak-hold levels; a GUI may reset these to 0
         self.out_peak = 0
         self.tap = None    # panel addition: a function that also receives every played frame
+        self.nr = None     # panel addition: noise reduction for the direct playback path
         self.mix_mic = False                   # panel addition: the microphone drives the sending,
         self.cable_buf = bytearray()           # and what arrives on the capture device (a cable that
         self.cable_lock = threading.Lock()     # FreeDV writes to) is mixed in with it
@@ -566,6 +567,8 @@ class Node:
         else:
             if self.out_gain != 1.0:
                 f = _apply_gain(f, self.out_gain)
+            if self.nr is not None:
+                f = self.nr.process(f)
             outdata[:] = _dup_stereo(f) if self.out_ch == 2 else f
             p = _peak(f)
             if p > self.out_peak:
@@ -2215,6 +2218,456 @@ class MeterBar(tk.Canvas):
             self.create_line(x, 0, x, h, fill="#222", width=2)
 
 
+# ---- noise reduction: spectral subtraction, for the audio you listen to ------------------------
+try:
+    import numpy as np
+    HAVE_NUMPY = True
+except Exception:                      # the panel works without numpy; only noise reduction is off
+    np = None
+    HAVE_NUMPY = False
+
+NR_LEVELS = list(range(1, 21))
+
+
+class SpectralNR:
+    """Spectral-subtraction noise reduction (Boll 1979, with Berouti's over-subtraction and
+    spectral floor) for mono 16-bit audio, in real time.
+
+    The audio is cut into 20 ms windows that overlap by half (a sine window, so the pieces add up
+    to exactly the original when nothing is subtracted). For each window the noise power that the
+    method has learned is subtracted from the signal's power, bin by bin:
+
+        clean power = max(power - alpha * noise power, beta * power)
+
+    alpha is the over-subtraction (larger where the signal is close to the noise, because that is
+    where the noise estimate is least trustworthy) and beta is the spectral floor that stops bins
+    being cut to nothing, which is what makes "musical noise". The power is smoothed over 3 bins
+    and over time before it is compared, and the gain is smoothed too, for the same reason.
+
+    Where the noise comes from:
+      * after calibrate(), from a noise profile measured on a quiet frequency; it then only
+        follows slow changes (for example the receiver's AGC), and only from frames that look like
+        noise;
+      * before that, from a tracker that follows the minimum quickly and creeps upward slowly.
+
+    level (1 to 20) sets how much is taken out: alpha, the floor, and the smoothing. The
+    "conditions" found at calibration (how steady the noise is) make it more cautious when the
+    noise is not steady, because subtracting a noise estimate that keeps changing is what produces
+    artefacts.
+
+    The window pipeline always runs, with the same delay (about 20 ms) whether noise reduction is
+    on or off, so switching it never makes a click. process() takes and returns bytes of the same
+    length."""
+
+    MIN_BIAS = 2.1             # taking a minimum under-estimates the mean; this corrects it
+
+    def __init__(self, rate=48000, level=8):
+        self.rate = int(rate)
+        self.hop = max(16, int(round(self.rate * 0.010)))            # 10 ms
+        self.n = 2 * self.hop                                         # 20 ms window, 50 % overlap
+        self.bins = self.n // 2 + 1
+        self.win = np.sin(np.pi * (np.arange(self.n) + 0.5) / self.n)
+        self.enabled = False       # the on/off switch
+        self.muted = False         # while calibrating, the speakers hear nothing
+        self.capture = None        # while calibrating: a list that gets every window's power
+        self.calibrated = False
+        self.noise = None
+        self._ps = self._sub = None          # the minimum-statistics tracker
+        self._hist = []
+        self._count = 0
+        self.cond = 1.0            # 0.5 (unsteady noise) to 1.0 (steady noise)
+        self.alpha_k = np.ones(self.bins)
+        self.info = {}
+        self.g_prev = np.ones(self.bins)
+        self.p_prev = None
+        self._in = np.zeros(0)
+        self._out = np.zeros(self.n)           # primed with silence: a fixed delay, never short
+        self._ola = np.zeros(self.hop)
+        self.set_level(level)
+
+    # ---- the level ---------------------------------------------------------------------------
+    def set_level(self, level):
+        self.level = int(max(1, min(20, level)))
+        t = (self.level - 1) / 19.0
+        caution = 0.6 + 0.4 * self.cond                       # 1.0 for steady noise, less otherwise
+        self.alpha0 = 1.5 + 3.5 * t * caution                 # over-subtraction at low SNR
+        self.depth_db = (9.0 + 21.0 * t) * caution            # the deepest cut, in dB (about)
+        self.beta = 2.0 * 10 ** (-self.depth_db / 10.0)       # spectral floor, a fraction of the noise power
+        self.p_smooth = min(0.9, 0.70 + 0.10 * t + 0.10 * (1.0 - self.cond))   # smoothing of power over time
+        self.g_att = 0.30 + 0.20 * (1.0 - self.cond)          # gain may rise quickly ...
+        self.g_rel = 0.60                                     # ... and falls more slowly
+
+    # ---- the audio ---------------------------------------------------------------------------
+    def process(self, data):
+        x = np.frombuffer(data, dtype=np.int16).astype(np.float64)
+        self._in = np.concatenate((self._in, x)) if len(self._in) else x
+        made = []
+        while len(self._in) >= self.n:
+            made.append(self._frame(self._in[:self.n]))
+            self._in = self._in[self.hop:]
+        if made:
+            self._out = np.concatenate([self._out] + made)
+        k = len(x)
+        y, self._out = self._out[:k], self._out[k:]
+        if len(y) < k:                                        # cannot happen; never return short
+            y = np.concatenate((y, np.zeros(k - len(y))))
+        return np.clip(np.rint(y), -32768, 32767).astype(np.int16).tobytes()
+
+    def _frame(self, frame):
+        X = np.fft.rfft(frame * self.win)
+        P = X.real * X.real + X.imag * X.imag
+        if self.capture is not None:
+            self.capture.append(P)
+        Pn = self._track(P)
+        if self.muted:
+            gain = 0.0
+        elif self.enabled:
+            gain = self._gain(P, Pn)
+        else:
+            gain = 1.0
+            self.g_prev[:] = 1.0                              # so that switching on fades in
+            self.p_prev = None
+        y = np.fft.irfft(X * gain, self.n) * self.win
+        out = self._ola + y[:self.hop]
+        self._ola = y[self.hop:]
+        return out
+
+    @staticmethod
+    def _smooth(v):
+        """1-2-1 smoothing across neighbouring bins."""
+        s = np.empty_like(v)
+        s[1:-1] = 0.25 * v[:-2] + 0.5 * v[1:-1] + 0.25 * v[2:]
+        s[0] = 0.75 * v[0] + 0.25 * v[1]
+        s[-1] = 0.75 * v[-1] + 0.25 * v[-2]
+        return s
+
+    def _track(self, P):
+        """The noise power per bin."""
+        if self.calibrated:
+            # follow slow changes (the receiver's AGC, say), only from bins that look like noise
+            Pn = self.noise
+            quiet = P < 2.5 * Pn
+            self.noise = np.where(quiet, 0.995 * Pn + 0.005 * P, Pn)
+            return self.noise
+        # No profile: minimum statistics (after Martin). Smooth the power, take its minimum over
+        # about 1.5 s (ten pieces of 150 ms), and correct for the bias of taking a minimum.
+        if self._ps is None:
+            self._ps = P.copy()
+            self._sub = P.copy()
+        self._ps = 0.85 * self._ps + 0.15 * P
+        self._sub = np.minimum(self._sub, self._ps)
+        self._count += 1
+        if self._count >= 15:
+            self._hist.append(self._sub)
+            if len(self._hist) > 10:
+                self._hist.pop(0)
+            self._sub = self._ps.copy()
+            self._count = 0
+        est = self._sub
+        for h in self._hist:
+            est = np.minimum(est, h)
+        return est * self.MIN_BIAS
+
+    def _gain(self, P, Pn):
+        Ps = self._smooth(P)
+        if self.p_prev is not None:
+            Ps = self.p_smooth * self.p_prev + (1.0 - self.p_smooth) * Ps
+        self.p_prev = Ps
+        snr_db = 10.0 * np.log10(np.maximum(Ps, 1e-9) / np.maximum(Pn, 1e-9))
+        a = 1.0 + (self.alpha0 - 1.0) * np.clip((20.0 - snr_db) / 25.0, 0.0, 1.0)
+        a = a * self.alpha_k
+        clean = np.maximum(Ps - a * Pn, self.beta * Pn)
+        g = np.minimum(1.0, np.sqrt(clean / np.maximum(Ps, 1e-9)))
+        g = np.where(g > self.g_prev, self.g_att * self.g_prev + (1.0 - self.g_att) * g,
+                     self.g_rel * self.g_prev + (1.0 - self.g_rel) * g)
+        g = self._smooth(g)
+        self.g_prev = g
+        return g
+
+    # ---- calibration -----------------------------------------------------------------------
+    def dbfs(self, mean_power):
+        """Noise level, in dB relative to full scale, from a mean power per bin."""
+        total = 2.0 * mean_power.sum() - mean_power[0] - mean_power[-1]
+        sigma2 = total / self.n / (self.n / 2.0)
+        return 10.0 * np.log10(max(sigma2, 1e-12) / 32768.0 ** 2)
+
+    def build_profile(self, frames):
+        """Learn the noise from windows of noise-only audio (a list of power spectra) and tune
+        the subtraction to the level and to how steady the noise is. Returns what it found."""
+        P = np.asarray(frames, dtype=np.float64)
+        mean = P.mean(axis=0)
+        total = P.sum(axis=1)
+        # How much the total power varies from window to window, compared with what steady Gaussian
+        # noise of this very spectrum would show (a narrow receiver passband has few independent
+        # bins, so even steady noise varies a good deal). 1.0 means steady.
+        expected = float(np.sqrt((mean ** 2).sum()) / max(mean.sum(), 1e-9))
+        nonstat = float(total.std() / max(total.mean(), 1e-9) / max(expected, 1e-9))
+        v_k = P.std(axis=0) / np.maximum(mean, 1e-9)                  # 1.0 for Gaussian noise
+        v = float(np.median(v_k))
+        q = max(len(total) // 4, 1)
+        trend_db = float(10.0 * np.log10(max(total[-q:].mean(), 1e-9) / max(total[:q].mean(), 1e-9)))
+        self.cond = float(np.clip(1.0 - 0.6 * max(0.0, v - 1.2) - 0.35 * max(0.0, nonstat - 1.4),
+                                  0.5, 1.0))
+        self.alpha_k = self._smooth(1.0 + 0.3 * np.clip(v_k - 1.1, 0.0, 1.5))
+        self.noise = self._smooth(mean)
+        self.calibrated = True
+        self.g_prev[:] = 1.0
+        self.p_prev = None
+        self.set_level(self.level)
+        self.info = dict(frames=len(frames), noise_dbfs=float(self.dbfs(mean)), nonstat=nonstat,
+                         variability=v, trend_db=trend_db, cond=self.cond)
+        return self.info
+
+    def features(self, frames, lo_hz=300, hi_hz=2900):
+        """How noise-like is a stretch of audio (a list of power spectra)? The scan for a quiet
+        frequency uses this. Returns:
+          peak_db   the highest narrow line above its surroundings (a carrier or a voice shows
+                    here; steady noise stays under about 3 dB)
+          nonstat   how much the total power moves, compared with steady noise of the same
+                    spectrum (1.0 steady; speech and static crashes are several times that)
+          dbfs      the level, in dB relative to full scale"""
+        P = np.asarray(frames, dtype=np.float64)
+        mean = P.mean(axis=0)
+        lo = max(1, int(lo_hz * self.n / self.rate))
+        hi = min(self.bins - 1, int(hi_hz * self.n / self.rate))
+        seg = 10.0 * np.log10(np.maximum(self._smooth(mean)[lo:hi], 1e-9))
+        k = 21                                                    # the local floor: the median over 21 bins
+        pad = np.pad(seg, k // 2, mode="edge")
+        floor = np.median(np.lib.stride_tricks.sliding_window_view(pad, k), axis=1)
+        total = P[:, lo:hi].sum(axis=1)
+        expected = np.sqrt((mean[lo:hi] ** 2).sum()) / max(mean[lo:hi].sum(), 1e-9)
+        return dict(peak_db=float((seg - floor).max()),
+                    nonstat=float(total.std() / max(total.mean(), 1e-9) / max(expected, 1e-9)),
+                    dbfs=float(self.dbfs(mean)))
+
+    def forget(self):
+        self.calibrated = False
+        self.noise = None
+        self._ps = self._sub = None
+        self._hist = []
+        self._count = 0
+        self.cond = 1.0
+        self.alpha_k = np.ones(self.bins)
+        self.info = {}
+        self.set_level(self.level)
+
+
+class NoiseCalibrator:
+    """Auto-calibrate for the noise reduction.
+
+    It retunes VFO A to a quiet frequency beside the one you are on, listens to the noise there,
+    teaches the noise reduction what that noise sounds like (and tunes the subtraction to the
+    level and to how steady the noise is), and retunes to where you were.
+
+    The radio is away from your frequency while it runs, so:
+      * the speakers are silent, and PTT and Tune are refused until the radio is back;
+      * anything unexpected (the audio stops, the mode changes, something keys the radio) first
+        puts the radio back on your frequency, and only then ends;
+      * if somebody else changes the frequency, or the connection is lost, it ends without
+        touching the radio, because putting it "back" would then be the wrong thing to do.
+
+    Candidates are tried nearest first. A frequency is taken as noise only if the audio there has no
+    narrow line (a carrier, a whistle, a voice) and its power is steady (no speech, no static
+    crashes, no fading). With nothing found it uses the least bad one and says so."""
+
+    SETTLE = 1.2           # seconds to wait after a retune before listening (network, buffers, AGC)
+    LISTEN = 1.5           # seconds to listen at each candidate frequency
+    FINAL = 4.0            # seconds of noise to measure for the profile
+    TUNE_WAIT = 3.0        # seconds for the radio to reach a frequency
+    OFFSETS_KHZ = {"ssb": (3, -3, 5, -5, 8, -8),
+                   "am": (10, -10, 15, -15, 20, -20),
+                   "fm": (25, -25, 50, -50, 75, -75)}
+    MAX_PEAK_DB, MAX_NONSTAT, SILENT_DBFS = 6.0, 2.5, -85.0
+
+    def __init__(self, panel):
+        self.p = panel
+        self.active = False
+        self.state = None
+
+    @staticmethod
+    def family(mode):
+        if mode in ("AM", "AMN"):
+            return "am"
+        if mode in ("FM", "FMN", "FM-D"):
+            return "fm"
+        if mode == "C4FM":
+            return None
+        return "ssb"                       # SSB, CW, RTTY and the data modes
+
+    def at(self, snap, hz):
+        return snap.get("freq") is not None and abs(snap["freq"] - hz) < 5
+
+    # ---- start and end ----------------------------------------------------------------------
+    def start(self):
+        p = self.p
+        if self.active:
+            return self.abort("cancelled by you")
+        if not HAVE_NUMPY:
+            return messagebox.showinfo("Noise reduction", "Noise reduction needs numpy: pip install numpy")
+        if p.nr is None or not p.audio_running():
+            return messagebox.showinfo("Noise reduction", "Start the audio first: the calibration listens "
+                                                          "to the radio's audio.")
+        if not p.radio.connected:
+            return messagebox.showinfo("Noise reduction", "Connect to the radio first: the calibration "
+                                                          "retunes it.")
+        s = p.radio.snapshot()
+        if s.get("freq") is None or s.get("mode") is None:
+            return messagebox.showinfo("Noise reduction", "The radio's frequency and mode are not known yet.")
+        if s.get("ptt") or p.ptt_down or s.get("tuning") or p.tune_deadline:
+            return messagebox.showinfo("Noise reduction", "Not while the radio is transmitting or tuning.")
+        fam = self.family(s["mode"])
+        if fam is None:
+            return messagebox.showinfo("Noise reduction", "C4FM is a digital mode, so noise reduction does "
+                                                          "not apply.")
+        self.orig, self.mode = s["freq"], s["mode"]
+        self.cands = [self.orig + 1000 * k for k in self.OFFSETS_KHZ[fam] if 30000 <= self.orig + 1000 * k <= 470000000]
+        if not self.cands:
+            return messagebox.showinfo("Noise reduction", "No frequency to listen on beside this one.")
+        self.i, self.results, self.forced, self.uncertain = 0, [], False, False
+        self.wrong_since = None
+        self.active = True
+        p.nr.muted, p.nr.capture = True, None
+        p.nr_btn.configure(text="Cancel")
+        p.append_log(f"Noise calibration: looking for a quiet frequency beside "
+                     f"{self.orig / 1e6:.6f} MHz (the speakers are silent, PTT and Tune are off until "
+                     "it is done)")
+        self.tune(self.cands[0], "settle")
+
+    def tune(self, hz, then):
+        self.target, self.state, self.after, self.t0 = hz, "tuning", then, time.monotonic()
+        self.p.radio.set_freq("A", int(hz))
+        self.say(f"Calibrating: tuning to {hz / 1e6:.3f} MHz ...")
+
+    def say(self, text):
+        self.p.nr_status.set(text)
+
+    def restore(self, message):
+        """Put the radio back on the frequency you were on, then finish."""
+        self.message, self.state, self.t0, self.retried = message, "restoring", time.monotonic(), False
+        self.p.nr.capture = None if self.p.nr else None
+        self.p.radio.set_freq("A", int(self.orig))
+        self.say("Calibrating: returning to your frequency ...")
+
+    def done(self, message):
+        p = self.p
+        if p.nr is not None:
+            p.nr.muted, p.nr.capture = False, None
+        self.active, self.state = False, None
+        p.nr_btn.configure(text="Auto-calibrate")
+        p.nr_status.set(message)
+        p.append_log("Noise calibration: " + message)
+
+    def abort(self, reason, restore=True):
+        if not self.active or self.state == "restoring":
+            return
+        radio = self.p.radio
+        if restore and radio.connected and not self.at(radio.snapshot(), self.orig):
+            self.restore(f"stopped ({reason}); the radio is back on {self.orig / 1e6:.6f} MHz")
+        else:
+            self.done(f"stopped ({reason})")
+
+    # ---- the steps, called every 100 ms by the panel's tick ----------------------------------
+    def step(self):
+        if not self.active:
+            return
+        p, now = self.p, time.monotonic()
+        s = p.radio.snapshot()
+        if not p.radio.connected:
+            return self.done("the connection to the radio was lost; the radio was left as it is")
+        if self.state == "restoring":
+            return self.step_restoring(s, now)
+        if p.nr is None or not p.audio_running():
+            return self.abort("the audio stopped")
+        if s.get("ptt") or p.ptt_down:
+            return self.abort("the radio is transmitting")
+        if s.get("mode") != self.mode:
+            return self.abort("the mode was changed")
+        if self.state != "tuning" and not self.at(s, self.target):
+            self.wrong_since = self.wrong_since or now
+            if now - self.wrong_since > 1.5:
+                return self.done("the frequency was changed by something else; the radio was left as it is")
+        else:
+            self.wrong_since = None
+        nr = p.nr
+        if self.state == "tuning":
+            if self.at(s, self.target):
+                self.state, self.t0 = "settle", now
+            elif now - self.t0 > self.TUNE_WAIT:
+                self.abort("the radio did not tune")
+        elif self.state == "settle":
+            if now - self.t0 >= self.SETTLE:
+                nr.capture, self.s_samples, self.cap_start = [], [], now
+                self.state = "final" if self.forced else "listen"
+        elif self.state in ("listen", "final"):
+            if s.get("s_raw") is not None:
+                self.s_samples.append(s["s_raw"])
+            self.say(f"Calibrating: listening at {(self.target - self.orig) / 1000:+.0f} kHz ...")
+            if self.state == "listen" and now - self.cap_start >= self.LISTEN:
+                self.evaluate()
+            elif self.state == "final" and now - self.cap_start >= self.FINAL:
+                self.finish_profile()
+
+    def evaluate(self):
+        p, nr = self.p, self.p.nr
+        frames = list(nr.capture)
+        feat = nr.features(frames) if len(frames) >= 60 else dict(peak_db=99.0, nonstat=99.0, dbfs=-120.0)
+        silent = feat["dbfs"] < self.SILENT_DBFS
+        ok = (not silent and feat["peak_db"] < self.MAX_PEAK_DB and feat["nonstat"] < self.MAX_NONSTAT)
+        s_avg = (sum(self.s_samples) / len(self.s_samples)) if self.s_samples else None
+        self.results.append(dict(hz=self.target, ok=ok, silent=silent, s=s_avg, **feat))
+        what = ("no sound (is the squelch closed?)" if silent else "noise only" if ok else
+                "not clear: " + ("a carrier or a tone" if feat["peak_db"] >= self.MAX_PEAK_DB
+                                else "unsteady, speech or static"))
+        p.append_log(f"Noise calibration: {(self.target - self.orig) / 1000:+.0f} kHz: {what} "
+                     f"(line {feat['peak_db']:.0f} dB, steadiness {feat['nonstat']:.1f}, "
+                     f"level {feat['dbfs']:.0f} dBFS"
+                     + (f", S-meter {s_avg:.0f}" if s_avg is not None else "") + ")")
+        if ok:                                     # keep listening here: the same audio becomes the profile
+            self.state = "final"
+            return
+        nr.capture = []
+        self.i += 1
+        if self.i < len(self.cands):
+            return self.tune(self.cands[self.i], "settle")
+        usable = [r for r in self.results if not r["silent"]]
+        if not usable:
+            return self.abort("there was no sound on any of the frequencies tried; open the squelch")
+        best = min(usable, key=lambda r: r["peak_db"] + 2.0 * max(0.0, r["nonstat"] - self.MAX_NONSTAT))
+        self.uncertain, self.forced = True, True
+        p.append_log(f"Noise calibration: no clear frequency; using {(best['hz'] - self.orig) / 1000:+.0f} kHz")
+        self.tune(best["hz"], "settle")
+
+    def finish_profile(self):
+        p, nr = self.p, self.p.nr
+        frames = list(nr.capture)
+        nr.capture = None
+        if len(frames) < 150:
+            return self.abort("too little audio arrived to measure the noise")
+        info = nr.build_profile(frames)
+        nr.enabled = True
+        p.nr_on.set(True)
+        steady = ("steady" if info["cond"] >= 0.9 else "fairly steady" if info["cond"] >= 0.7 else "unsteady")
+        text = (f"calibrated at {(self.target - self.orig) / 1000:+.0f} kHz: noise {info['noise_dbfs']:.0f} dBFS, "
+                f"{steady}"
+                + (", level still changing" if abs(info["trend_db"]) > 3 else "")
+                + (", NO CLEAR FREQUENCY, so it may include a signal" if self.uncertain else "")
+                + f". Noise reduction is on, level {nr.level}.")
+        p.append_log(f"Noise calibration: profile from {info['frames']} windows; steadiness "
+                     f"{info['nonstat']:.2f}, variability {info['variability']:.2f}, trend "
+                     f"{info['trend_db']:+.1f} dB, cautiousness {info['cond']:.2f}")
+        self.restore(text)
+
+    def step_restoring(self, s, now):
+        if self.at(s, self.orig):
+            return self.done(self.message)
+        if now - self.t0 > 4.0 and not self.retried:
+            self.retried = True
+            self.p.radio.set_freq("A", int(self.orig))
+        elif now - self.t0 > 9.0:
+            self.done(f"WARNING: could not confirm that the radio is back on {self.orig / 1e6:.6f} MHz; "
+                      "check its frequency")
+
+
 class AudioPath:
     """One local audio path: capture from one device and play on another, with a gain and peak
     meters. A receive path and a transmit path make up the local router that the Audio tab uses
@@ -2230,6 +2683,7 @@ class AudioPath:
         self.rate, self.bs = rate, rate * frame_ms // 1000
         self.out_ch = 2 if stereo else 1
         self.sink = None                # a function that takes each captured frame (no output device)
+        self.nr = None                  # noise reduction, for the receive path to the speakers
         self.buf, self.lock, self.primed = bytearray(), threading.Lock(), False
         self.gain, self.peak, self.peak_in = 1.0, 0, 0     # peak_in: before the gain, peak: after
         self.underruns = self.dropped = self.in_blocks = self.out_blocks = 0
@@ -2303,6 +2757,8 @@ class AudioPath:
             p = _peak(data)
             if p > self.peak_in:
                 self.peak_in = p
+            if self.nr is not None:                # noise reduction, before the volume
+                data = self.nr.process(data)
             if self.gain != 1.0:
                 data = _apply_gain(data, self.gain)
                 p = _peak(data)
@@ -2712,6 +3168,7 @@ class Panel:
         self.a_txdiag = {"mic": 0, "sent": 0, "alc": 0.0, "tx": 0}   # transmit peaks, last second
         self.a_tick, self.a_was_linked = 0, False
         self.a_detail_text = ""
+        self.nr, self.nr_cal = None, NoiseCalibrator(self)      # noise reduction (when the audio runs)
         if not AUDIO_OK:
             ttk.Label(tab, justify="left", wraplength=380, text=(
                 "Audio streaming is not available:\n" + str(AUDIO_ERR) + "\n\nInstall the "
@@ -2722,6 +3179,9 @@ class Panel:
         adv = c.get("audio_adv", {})
         self.audio_mode = tk.StringVar(value=c.get("audio_mode", "remote"))
         self.audio_all_devices = tk.BooleanVar(value=bool(c.get("audio_all_devices", False)))
+        self.nr_on = tk.BooleanVar(value=bool(c.get("nr_on", False)))
+        self.nr_level = tk.StringVar(value=str(int(c.get("nr_level", 8))))
+        self.nr_status = tk.StringVar(value="")
         self._reset_noted = set()
         self.audio_host = tk.StringVar(value=c.get("audio_host", ""))
         self.audio_port = tk.StringVar(value=str(c.get("audio_port", 5800)))
@@ -2793,41 +3253,62 @@ class Panel:
         ttk.Label(tab, text="Level:").grid(row=7, column=0, sticky="w")
         self.a_rx_bar = MeterBar(tab, width=200)
         self.a_rx_bar.grid(row=7, column=1, sticky="ew", padx=4, pady=1)
+        # noise reduction (spectral subtraction) on the audio you listen to
+        ttk.Style().configure("Compact.TButton", padding=(5, 1), width=0)
+        nrf = ttk.Frame(tab)
+        nrf.grid(row=8, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        self.nr_chk = ttk.Checkbutton(nrf, text="Noise reduction", variable=self.nr_on,
+                                      command=self.on_nr_toggle)
+        self.nr_chk.grid(row=0, column=0)
+        ttk.Label(nrf, text="Level").grid(row=0, column=1, padx=(10, 3))
+        self.nr_cb = ttk.Combobox(nrf, textvariable=self.nr_level, state="readonly", width=3,
+                                  values=[str(n) for n in NR_LEVELS])
+        self.nr_cb.grid(row=0, column=2)
+        self.nr_cb.bind("<<ComboboxSelected>>", lambda e: self.on_nr_level())
+        self.nr_btn = ttk.Button(nrf, text="Auto-calibrate", style="Compact.TButton",
+                                 command=self.nr_cal.start)
+        self.nr_btn.grid(row=0, column=3, padx=(12, 0))
+        ttk.Label(tab, textvariable=self.nr_status, foreground="#666666", wraplength=380,
+                  justify="left").grid(row=9, column=0, columnspan=3, sticky="w", pady=(1, 0))
+        if not HAVE_NUMPY:
+            for w in (self.nr_chk, self.nr_cb, self.nr_btn):
+                w.configure(state="disabled")
+        self.refresh_nr_status()
 
-        ttk.Label(tab, text="Transmit", font=bold).grid(row=8, column=0, columnspan=3,
+        ttk.Label(tab, text="Transmit", font=bold).grid(row=10, column=0, columnspan=3,
                                                         sticky="w", pady=(8, 0))
-        ttk.Label(tab, text="Mic to computer:").grid(row=9, column=0, sticky="w")
+        ttk.Label(tab, text="Mic to computer:").grid(row=11, column=0, sticky="w")
         self.a_mic_cb = ttk.Combobox(tab, textvariable=self.a_mic, width=21, state="readonly")
-        self.a_mic_cb.grid(row=9, column=1, sticky="ew", padx=4, pady=1)
+        self.a_mic_cb.grid(row=11, column=1, sticky="ew", padx=4, pady=1)
         self.a_mic_cb.bind("<<ComboboxSelected>>", lambda e: self.on_audio_dev_pick("mic"))
         ttk.Button(tab, text="Rescan", width=7, command=self.refresh_audio_devices).grid(
-            row=9, column=2)
-        ttk.Label(tab, text="Computer to radio:").grid(row=10, column=0, sticky="w")
+            row=11, column=2)
+        ttk.Label(tab, text="Computer to radio:").grid(row=12, column=0, sticky="w")
         self.a_radio_out_cb = ttk.Combobox(tab, textvariable=self.a_radio_out, width=21,
                                            state="readonly")
-        self.a_radio_out_cb.grid(row=10, column=1, sticky="ew", padx=4, pady=1)
+        self.a_radio_out_cb.grid(row=12, column=1, sticky="ew", padx=4, pady=1)
         self.a_radio_out_cb.bind("<<ComboboxSelected>>",
                                  lambda e: self.on_audio_dev_pick("radio_out"))
         self.a_all_ck = ttk.Checkbutton(tab, text="Show all", variable=self.audio_all_devices,
                                         command=self.apply_audio_devices)
-        self.a_all_ck.grid(row=10, column=2)
-        ttk.Label(tab, text="Mic level:").grid(row=11, column=0, sticky="w")
+        self.a_all_ck.grid(row=12, column=2)
+        ttk.Label(tab, text="Mic level:").grid(row=13, column=0, sticky="w")
         self.a_tx_scale = ttk.Scale(tab, from_=0, to=200, orient="horizontal",
                                     variable=self.tx_var, command=self.on_audio_tx_slide)
-        self.a_tx_scale.grid(row=11, column=1, sticky="ew", padx=4)
-        ttk.Label(tab, textvariable=self.a_tx_lbl, width=6).grid(row=11, column=2, sticky="w")
-        ttk.Label(tab, text="Level:").grid(row=12, column=0, sticky="w")
+        self.a_tx_scale.grid(row=13, column=1, sticky="ew", padx=4)
+        ttk.Label(tab, textvariable=self.a_tx_lbl, width=6).grid(row=13, column=2, sticky="w")
+        ttk.Label(tab, text="Level:").grid(row=14, column=0, sticky="w")
         self.a_tx_bar = MeterBar(tab, width=200)
-        self.a_tx_bar.grid(row=12, column=1, sticky="ew", padx=4, pady=1)
+        self.a_tx_bar.grid(row=14, column=1, sticky="ew", padx=4, pady=1)
         self.mic_btn = ttk.Button(tab, text="Mic: OFF", width=10, command=self.toggle_mic)
-        self.mic_btn.grid(row=13, column=0, sticky="w", pady=(3, 0))
+        self.mic_btn.grid(row=15, column=0, sticky="w", pady=(3, 0))
         ttk.Label(tab, text="The microphone is sent only while Mic is ON, or while PTT is on.",
                   foreground="#666666", wraplength=250, justify="left").grid(
-            row=13, column=1, columnspan=2, sticky="w", padx=4, pady=(3, 0))
+            row=15, column=1, columnspan=2, sticky="w", padx=4, pady=(3, 0))
 
-        ttk.Separator(tab).grid(row=14, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Separator(tab).grid(row=16, column=0, columnspan=3, sticky="ew", pady=6)
         g = ttk.Frame(tab)
-        g.grid(row=15, column=0, columnspan=3, sticky="w", pady=(0, 2))
+        g.grid(row=17, column=0, columnspan=3, sticky="w", pady=(0, 2))
         ttk.Label(g, text="Codec:").grid(row=0, column=0)
         codecs = ["pcm", "opus"] if HAVE_OPUS else ["pcm"]
         self.a_codec_cb = ttk.Combobox(g, textvariable=self.audio_codec, values=codecs, width=5,
@@ -2844,7 +3325,7 @@ class Panel:
         # the bridge's own options, hidden until wanted
         h = ttk.Frame(tab)
         self.a_adv = h
-        h.grid(row=16, column=0, columnspan=3, sticky="w", pady=(2, 2))
+        h.grid(row=18, column=0, columnspan=3, sticky="w", pady=(2, 2))
         ttk.Label(h, text="Rate:").grid(row=0, column=0, sticky="e")
         self.a_rate_cb = ttk.Combobox(h, textvariable=self.audio_rate, width=6, state="readonly",
                                       values=[str(r) for r in OPUS_RATES])
@@ -2880,12 +3361,12 @@ class Panel:
                   foreground="#666666").grid(row=4, column=0, columnspan=6, sticky="w")
 
         ttk.Label(tab, textvariable=self.audio_status, wraplength=380, justify="left").grid(
-            row=17, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            row=19, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Button(tab, text="Copy report", width=12, command=self.copy_report).grid(
-            row=18, column=0, sticky="w", pady=(4, 0))
+            row=20, column=0, sticky="w", pady=(4, 0))
         ttk.Label(tab, text="Copies the settings, status and log, to paste into a message.",
                   foreground="#666666", wraplength=250, justify="left").grid(
-            row=18, column=1, columnspan=2, sticky="w", padx=4, pady=(4, 0))
+            row=20, column=1, columnspan=2, sticky="w", padx=4, pady=(4, 0))
         self.a_hint.set(self.HINT_REMOTE if self.audio_mode.get() == "remote" else self.HINT_LOCAL)
         self.apply_adv_visibility()
         self.refresh_audio_devices(reinit=False)
@@ -3225,6 +3706,13 @@ class Panel:
             messagebox.showerror("Audio", f"Could not start the audio:\n{exc}")
             return
         self.rx_router, self.tx_router, self.audio_node = rx_router, tx_router, node
+        self.nr = None
+        if HAVE_NUMPY:
+            self.nr = SpectralNR(rate, int(self.nr_level.get()))
+            self.nr.enabled = self.nr_on.get()
+            target = rx_router if rx_router is not None else node     # the speakers' path only:
+            target.nr = self.nr                                       # not the cable that FreeDV reads
+        self.refresh_nr_status()
         self.a_tx_cable = tx_cable
         self.mic_on = False
         self.mic_btn.configure(text="Mic: OFF")
@@ -3239,7 +3727,41 @@ class Panel:
         self.append_log(f"Audio started {where} ("
                         + ("microphone muted" if self.has_mic_path() else "listen only") + ")")
 
+    # ---- noise reduction ---------------------------------------------------------------------
+    def on_nr_toggle(self):
+        if self.nr is not None:
+            self.nr.enabled = self.nr_on.get()
+        self.refresh_nr_status()
+        self.save_cfg()
+
+    def on_nr_level(self):
+        if self.nr is not None:
+            self.nr.set_level(int(self.nr_level.get()))
+        self.refresh_nr_status()
+        self.save_cfg()
+
+    def refresh_nr_status(self):
+        if self.nr_cal.active:
+            return                                   # the calibration is writing its own progress
+        level = self.nr_level.get()
+        if not HAVE_NUMPY:
+            text = "Noise reduction needs numpy (pip install numpy), which is not installed."
+        elif self.nr is None:
+            text = (f"{'On' if self.nr_on.get() else 'Off'}, level {level}. Works while the audio runs.")
+        elif self.nr.calibrated:
+            info = self.nr.info
+            text = (f"{'On' if self.nr.enabled else 'Off'}, level {level}. Calibrated: noise "
+                    f"{info['noise_dbfs']:.0f} dBFS, "
+                    f"{'steady' if info['cond'] >= 0.9 else 'fairly steady' if info['cond'] >= 0.7 else 'unsteady'}.")
+        else:
+            text = (f"{'On' if self.nr.enabled else 'Off'}, level {level}. Not calibrated (it follows the "
+                    "noise by itself).")
+        self.nr_status.set(text)
+
     def audio_stop(self):
+        if self.nr_cal.active:
+            self.nr_cal.abort("the audio was stopped")
+        self.nr = None
         parts = (self.rx_router, self.tx_router, self.audio_node)
         self.rx_router = self.tx_router = self.audio_node = None
         for part in parts:
@@ -3752,6 +4274,10 @@ class Panel:
         if self.radio.snapshot().get("tuning") or self.tune_deadline:
             self.append_log("PTT: the antenna tuner is tuning")
             return
+        if self.nr_cal.active:
+            self.append_log("PTT: the noise calibration has the radio on another frequency; press "
+                            "Cancel first")
+            return
         self.ptt_down = True
         if self.audio_running() and self.has_mic_path() and not self.mic_on:
             self._ptt_auto_mic = True            # the microphone is live only while PTT is held
@@ -3918,6 +4444,7 @@ class Panel:
                     s9_raw=self.s9_raw if self.s9_calibrated else None)
         if self.audio_ready:
             data.update(audio_mode=self.audio_mode.get(),
+                        nr_on=self.nr_on.get(), nr_level=int(self.nr_level.get()),
                         audio_all_devices=self.audio_all_devices.get(),
                         audio_host=self.audio_host.get().strip(), audio_codec=self.audio_codec.get(),
                         audio_port=self.audio_port.get(), audio_jitter=self.audio_jitter.get(),
@@ -4001,6 +4528,10 @@ class Panel:
     def on_tune(self):
         if not self.can_send():
             return
+        if self.nr_cal.active:
+            self.append_log("Tune: the noise calibration has the radio on another frequency; press "
+                            "Cancel first")
+            return
         if self.tune_deadline or self.radio.snapshot().get("tuning"):   # already tuning: stop
             self.radio.tune_stop()
             self.tune_deadline = 0.0
@@ -4067,6 +4598,9 @@ class Panel:
             self.root.after_cancel(self._tick_id)
         except (AttributeError, tk.TclError):
             pass
+        if self.nr_cal.active:
+            self.nr_cal.abort("closing")
+            time.sleep(0.5)                          # let the retune reach the radio first
         if self.ptt_down:
             self.ptt_release(reason=" (closing)")
             time.sleep(0.3)                          # let the release reach the radio first
@@ -4159,6 +4693,7 @@ class Panel:
         self.update_agc(s, now)
         self.update_ptt()
         self.update_audio(now)
+        self.nr_cal.step()
         if self.nb.select() == str(self.settings_tab):
             self.settings_tab.refresh()
         self.split_btn.configure(
@@ -4299,6 +4834,17 @@ def run_selftest(path):
 
     check("sounddevice and PortAudio", sound)
     check("Opus library", opus)
+
+    def numpy_ok():
+        need(HAVE_NUMPY, "numpy is not installed, so noise reduction is off")
+        nr = SpectralNR(48000)                      # a real pass through the FFT, not just the import
+        nr.enabled = True
+        for _ in range(4):
+            out = nr.process(bytes(960))
+        need(len(out) == 960, "the noise reduction returned the wrong amount of audio")
+        return f"numpy {np.__version__}, noise reduction ran"
+
+    check("numpy (noise reduction)", numpy_ok)
     text = "\n".join(f"{status} {name}: {detail}" for status, name, detail in rows) + "\n"
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)

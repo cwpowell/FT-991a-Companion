@@ -2,5 +2,8 @@
 # These are for the Audio tab and the audio bridge:
 sounddevice
 
+# Optional, for the noise reduction on the Audio tab (everything else works without it).
+numpy
+
 # Optional, for the Opus codec. It also needs the Opus library (libopus; opus.dll on Windows).
 opuslib
