@@ -45,6 +45,8 @@ opuslib for Opus).   python3 ft991a_panel.py [--host H --port P]
 Meter values come from Hamlib's own calibration tables. If your wattmeter disagrees, use
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
+__version__ = "1.0.2"      # shown in the title bar; the installers and the report use it too
+
 import argparse
 import json
 import math
@@ -900,8 +902,12 @@ BACKENDS = {"Hamlib rigctld": "hamlib", "Raw CAT (ser2net)": "cat"}
 POWERS_HF = [5, 25, 50, 75, 100]
 POWERS_VHF = [5, 25, 50]          # 144 / 430 MHz: 50 W maximum
 
-ALC_WARN, ALC_BAD = 0.05, 0.25    # ALC meter fraction (0-1); adjust to taste
+# The radio's own ALC meter reaches mid-scale when CAT reports about a quarter of full scale, so the
+# reading is doubled to match what the radio shows. Green to 25 %, orange to 50 %, red above that.
+ALC_SCALE = 2.0
+ALC_WARN, ALC_BAD = 0.25, 0.50    # on the doubled scale (0-1)
 BLUE, GREEN, AMBER, RED, GREY = "#2a7fd4", "#1a8f3c", "#d98a00", "#c62828", "#9a9a9a"
+YELLOW = "#f2c200"                # the ATU light when the tuner is in line
 S9_DEFAULT_RAW = 128              # assumed raw S-meter reading for S9 until you press Cal S9
 NONE_LABEL = "(none - listen only)"     # no microphone: receive audio only
 DIRECT_RX = "(direct: network to speakers)"      # remote radio, no virtual cable on receive
@@ -1100,6 +1106,15 @@ class Radio:
     def snapshot(self):
         with self.lock:
             return dict(self.state)
+
+    def read_menus(self, numbers):             # Hamlib cannot reach the radio's menu
+        pass
+
+    def write_menu(self, number, payload):
+        pass
+
+    def menu_snapshot(self):
+        return {}, {}
 
     def send(self, cmd, lines=1, timeout=REPLY_TIMEOUT):
         """Queue a command typed by the user (set commands reply with one RPRT line)."""
@@ -1339,6 +1354,7 @@ class CatRadio:
         self.power_job = None       # (when due, command): the PS command that follows dummy data
         self.quiet_until = 0.0      # nothing else is sent on the line until then
         self.state = self._blank()
+        self.menu_vals, self.menu_t = {}, {}    # menu number -> raw value, and when it arrived
 
     @staticmethod
     def _blank():
@@ -1354,6 +1370,19 @@ class CatRadio:
     def send(self, cmd, lines=1, timeout=0):
         """Queue a raw CAT command typed by the user, for example 'PC050;'."""
         self.userq.put(cmd)
+
+    # the radio's menu (the Settings tab)
+    def read_menus(self, numbers):
+        for n in numbers:
+            self.send(f"EX{n};")
+
+    def write_menu(self, number, payload):
+        self.send(f"EX{number}{payload};")
+        self.send(f"EX{number};")                 # read it back, to see what the radio kept
+
+    def menu_snapshot(self):
+        with self.lock:
+            return dict(self.menu_vals), dict(self.menu_t)
 
     # actions used by the panel (Radio has the same ones)
     def set_mode(self, ham):
@@ -1541,8 +1570,11 @@ class CatRadio:
                     st["bw_idx"] = int(msg[3:])
                 elif c == "NA" and len(msg) == 4 and msg[3] in "01":
                     st["narrow"] = msg[3] == "1"
-                elif c == "EX" and len(msg) == 6 and msg[2:5] == "062":
-                    st["data_mode"] = msg[5]                   # menu 062 DATA MODE: 0 PSK, 1 OTHER
+                elif c == "EX" and len(msg) >= 6 and msg[2:5].isdigit():
+                    self.menu_vals[msg[2:5]] = msg[5:]          # any menu item (Settings tab)
+                    self.menu_t[msg[2:5]] = time.monotonic()
+                    if msg[2:5] == "062":
+                        st["data_mode"] = msg[5]               # menu 062 DATA MODE: 0 PSK, 1 OTHER
                 elif c == "GT" and len(msg) == 4 and msg[3].isdigit():
                     st["agc"] = int(msg[3])
                 elif c == "MD" and len(msg) == 4:
@@ -1568,8 +1600,598 @@ class CatRadio:
                 pass
 
 
+# ---- the radio's menu, for the Settings tab ------------------------------------------------------
+# Every item of the FT-991A menu (CAT command EX, items 001 to 153), from Yaesu's CAT manual. Each
+# item has a kind: opt (a list of choices), num (a number), sgn (a signed number), tz (the time
+# zone), hz (a frequency) or ro (read only). "digits" is the width of the value in the command.
+# When the radio answers, its own reply decides the width, so a slip in this table cannot send a
+# value of the wrong length.
+
+def _N(lo, hi, step=1, digits=3, unit="", zero=None, scale=None):
+    return dict(kind="num", lo=lo, hi=hi, step=step, digits=digits, unit=unit, zero=zero,
+                scale=scale)
+
+
+def _S(lo, hi, step, digits, unit=""):
+    return dict(kind="sgn", lo=lo, hi=hi, step=step, digits=digits, unit=unit)
+
+
+def _O(*labels, first=0):
+    return dict(kind="opt", opts={str(first + i): lb for i, lb in enumerate(labels)}, digits=1)
+
+
+def _M(opts, digits=1):
+    return dict(kind="opt", opts=opts, digits=digits)
+
+
+def _CUT(base, step, last):
+    """OFF, then base Hz, base+step Hz ... for the filter cut-off items."""
+    opts = {"00": "OFF"}
+    for n in range(1, last + 1):
+        opts[f"{n:02d}"] = f"{base + (n - 1) * step} Hz"
+    return dict(kind="opt", opts=opts, digits=2)
+
+
+def _TZ():
+    opts = {}
+    for minutes in range(-12 * 60, 14 * 60 + 1, 30):
+        h, m = divmod(abs(minutes), 60)
+        opts[f"{'-' if minutes < 0 else '+'}{h:02d}{m:02d}"] = f"UTC{'-' if minutes < 0 else '+'}{h}:{m:02d}"
+    return dict(kind="opt", opts=opts, digits=5)
+
+
+_DELAY = _N(20, 4000, 20, 4, "msec")
+_LEVEL = _N(0, 100, 1, 3)
+_SLOPE = _O("6 dB/oct", "18 dB/oct")
+_DISEN = _O("DISABLE", "ENABLE")
+_PTT = _O("DAKY", "RTS", "DTR")
+_MICSEL = _O("MIC", "REAR")
+_COLORS = _O("BLUE", "GRAY", "GREEN", "ORANGE", "PURPLE", "RED", "SKY BLUE")
+_LCUT = _CUT(100, 50, 19)
+_HCUT = _CUT(700, 50, 67)
+_BAUD = _O("4800 bps", "9600 bps", "19200 bps", "38400 bps")
+_TOT = _O("10 msec", "100 msec", "1000 msec", "3000 msec")
+_EQLEV = _S(-20, 10, 1, 3, "dB")
+_EQBW = _N(1, 10, 1, 2)
+_CW_MEM = _O("TEXT", "MESSAGE")
+
+_MENU_SPECS = [
+    (1, "AGC FAST DELAY", _DELAY), (2, "AGC MID DELAY", _DELAY), (3, "AGC SLOW DELAY", _DELAY),
+    (4, "HOME FUNCTION", _O("SCOPE", "FUNCTION")),
+    (5, "MY CALL INDICATION", _N(0, 5, 1, 1, "sec")),
+    (6, "DISPLAY COLOR", _COLORS),
+    (7, "DIMMER LED", _O("1", "2")),
+    (8, "DIMMER TFT", _N(0, 15, 1, 2)),
+    (9, "BAR MTR PEAK HOLD", _O("OFF", "0.5 sec", "1.0 sec", "2.0 sec")),
+    (10, "DVS RX OUT LEVEL", _LEVEL), (11, "DVS TX OUT LEVEL", _LEVEL),
+    (12, "KEYER TYPE", _O("OFF", "BUG", "ELEKEY-A", "ELEKEY-B", "ELEKEY-Y", "ACS")),
+    (13, "KEYER DOT/DASH", _O("NORMAL", "REVERSE")),
+    (14, "CW WEIGHT", _N(25, 45, 1, 2, "", scale=0.1)),
+    (15, "BEACON INTERVAL", _N(0, 690, 1, 3, "sec", zero="OFF")),
+    (16, "NUMBER STYLE", _O("1290", "AUNO", "AUNT", "A2NO", "A2NT", "12NO", "12NT")),
+    (17, "CONTEST NUMBER", _N(0, 9999, 1, 4)),
+    (18, "CW MEMORY 1", _CW_MEM), (19, "CW MEMORY 2", _CW_MEM), (20, "CW MEMORY 3", _CW_MEM),
+    (21, "CW MEMORY 4", _CW_MEM), (22, "CW MEMORY 5", _CW_MEM),
+    (23, "NB WIDTH", _O("1 ms", "3 ms", "10 ms")),
+    (24, "NB REJECTION", _O("10 dB", "30 dB", "50 dB")),
+    (25, "NB LEVEL", _N(0, 10, 1, 2)),
+    (26, "BEEP LEVEL", _LEVEL),
+    (27, "TIME ZONE", _TZ()),
+    (28, "GPS/232C SELECT", _M({"0": "GPS1", "1": "GPS2", "3": "RS232C"})),
+    (29, "232C RATE", _BAUD), (30, "232C TOT", _TOT),
+    (31, "CAT RATE", _BAUD), (32, "CAT TOT", _TOT), (33, "CAT RTS", _DISEN),
+    (34, "MEM GROUP", _DISEN),
+    (35, "QUICK SPLIT FREQ", _S(-20, 20, 1, 3, "kHz")),
+    (36, "TX TOT", _N(0, 30, 1, 2, "min", zero="OFF")),
+    (37, "MIC SCAN", _DISEN),
+    (38, "MIC SCAN RESUME", _O("PAUSE", "TIME")),
+    (39, "REF FREQ ADJ", _S(-25, 25, 1, 3)),
+    (40, "CLAR MODE SELECT", _O("RX", "TX", "TRX")),
+    (41, "AM LCUT FREQ", _LCUT), (42, "AM LCUT SLOPE", _SLOPE),
+    (43, "AM HCUT FREQ", _HCUT), (44, "AM HCUT SLOPE", _SLOPE),
+    (45, "AM MIC SELECT", _MICSEL), (46, "AM OUT LEVEL", _LEVEL), (47, "AM PTT SELECT", _PTT),
+    (48, "AM PORT SELECT", _O("DATA", "USB")), (49, "AM DATA GAIN", _LEVEL),
+    (50, "CW LCUT FREQ", _LCUT), (51, "CW LCUT SLOPE", _SLOPE),
+    (52, "CW HCUT FREQ", _HCUT), (53, "CW HCUT SLOPE", _SLOPE),
+    (54, "CW OUT LEVEL", _LEVEL),
+    (55, "CW AUTO MODE", _O("OFF", "50 MHz", "ON")),
+    (56, "CW BK-IN TYPE", _O("SEMI BREAK-IN", "FULL BREAK-IN")),
+    (57, "CW BK-IN DELAY", _N(30, 3000, 10, 4, "msec")),
+    (58, "CW WAVE SHAPE", _O("1 msec", "2 msec", "4 msec", "6 msec")),
+    (59, "CW FREQ DISPLAY", _O("DIRECT FREQ", "PITCH OFFSET")),
+    (60, "PC KEYING", _O("OFF", "DAKY", "RTS", "DTR")),
+    (61, "QSK DELAY TIME", _O("15 msec", "20 msec", "25 msec", "30 msec")),
+    (62, "DATA MODE", _O("PSK", "OTHER")),
+    (63, "PSK TONE", _O("1000 Hz", "1500 Hz", "2000 Hz")),
+    (64, "OTHER DISP (SSB)", _S(-3000, 3000, 10, 5, "Hz")),
+    (65, "OTHER SHIFT (SSB)", _S(-3000, 3000, 10, 5, "Hz")),
+    (66, "DATA LCUT FREQ", _LCUT), (67, "DATA LCUT SLOPE", _SLOPE),
+    (68, "DATA HCUT FREQ", _HCUT), (69, "DATA HCUT SLOPE", _SLOPE),
+    (70, "DATA IN SELECT", _MICSEL), (71, "DATA PTT SELECT", _PTT),
+    (72, "DATA PORT SELECT", _O("DATA", "USB", first=1)),
+    (73, "DATA OUT LEVEL", _LEVEL),
+    (74, "FM MIC SELECT", _MICSEL), (75, "FM OUT LEVEL", _LEVEL),
+    (76, "FM PKT PTT SELECT", _PTT),
+    (77, "FM PKT PORT SELECT", _O("DATA", "USB", first=1)),
+    (78, "FM PKT TX GAIN", _LEVEL),
+    (79, "FM PKT MODE", _O("1200", "9600")),
+    (80, "RPT SHIFT 28MHz", _N(0, 1000, 10, 4, "kHz")),
+    (81, "RPT SHIFT 50MHz", _N(0, 4000, 10, 4, "kHz")),
+    (82, "RPT SHIFT 144MHz", _N(0, 4000, 10, 4, "kHz")),
+    (83, "RPT SHIFT 430MHz", _N(0, 10000, 10, 5, "kHz")),
+    (84, "ARS 144MHz", _O("OFF", "ON")), (85, "ARS 430MHz", _O("OFF", "ON")),
+    (86, "DCS POLARITY", _O("Tn-Rn", "Tn-Riv", "Tiv-Rn", "Tiv-Riv")),
+    (87, "RADIO ID", dict(kind="ro")),
+    (88, "GM DISPLAY", _O("DISTANCE", "STRENGTH")),
+    (89, "DISTANCE", _O("km", "mile")),
+    (90, "AMS TX MODE", _O("AUTO", "MANUAL", "DN", "VW", "ANALOG")),
+    (91, "STANDBY BEEP", _O("OFF", "ON")),
+    (92, "RTTY LCUT FREQ", _LCUT), (93, "RTTY LCUT SLOPE", _SLOPE),
+    (94, "RTTY HCUT FREQ", _HCUT), (95, "RTTY HCUT SLOPE", _SLOPE),
+    (96, "RTTY SHIFT PORT", _O("SHIFT", "DTR", "RTS")),
+    (97, "RTTY POLARITY-RX", _O("NORMAL", "REVERSE")),
+    (98, "RTTY POLARITY-TX", _O("NORMAL", "REVERSE")),
+    (99, "RTTY OUT LEVEL", _LEVEL),
+    (100, "RTTY SHIFT FREQ", _O("170 Hz", "200 Hz", "425 Hz", "850 Hz")),   # the manual lists 1,1,2,3: 170 Hz can only be 0
+    (101, "RTTY MARK FREQ", _O("1275 Hz", "2125 Hz", first=1)),
+    (102, "SSB LCUT FREQ", _LCUT), (103, "SSB LCUT SLOPE", _SLOPE),
+    (104, "SSB HCUT FREQ", _HCUT), (105, "SSB HCUT SLOPE", _SLOPE),
+    (106, "SSB MIC SELECT", _MICSEL), (107, "SSB OUT LEVEL", _LEVEL),
+    (108, "SSB PTT SELECT", _PTT),
+    (109, "SSB PORT SELECT", _O("DATA", "USB")),
+    (110, "SSB TX BPF", _O("50-3000", "100-2900", "200-2800", "300-2700", "400-2600")),
+    (111, "APF WIDTH", _O("NARROW", "MEDIUM", "WIDE")),
+    (112, "CONTOUR LEVEL", _S(-40, 20, 1, 3, "dB")),
+    (113, "CONTOUR WIDTH", _N(1, 11, 1, 2)),
+    (114, "IF NOTCH WIDTH", _O("NARROW", "WIDE")),
+    (115, "SCP DISPLAY MODE", _O("SPECTRUM", "WATER FALL")),
+    (116, "SCP SPAN FREQ", _M({"03": "50 kHz", "04": "100 kHz", "05": "200 kHz",
+                               "06": "500 kHz", "07": "1000 kHz"}, 2)),
+    (117, "SPECTRUM COLOR", _COLORS),
+    (118, "WATER FALL COLOR", _O("BLUE", "GRAY", "GREEN", "ORANGE", "PURPLE", "RED", "SKY BLUE",
+                                 "MULTI")),
+    (119, "PRMTRC EQ1 FREQ", _CUT(100, 100, 7)), (120, "PRMTRC EQ1 LEVEL", _EQLEV),
+    (121, "PRMTRC EQ1 BWTH", _EQBW),
+    (122, "PRMTRC EQ2 FREQ", _CUT(700, 100, 9)), (123, "PRMTRC EQ2 LEVEL", _EQLEV),
+    (124, "PRMTRC EQ2 BWTH", _EQBW),
+    (125, "PRMTRC EQ3 FREQ", _CUT(1500, 100, 18)), (126, "PRMTRC EQ3 LEVEL", _EQLEV),
+    (127, "PRMTRC EQ3 BWTH", _EQBW),
+    (128, "P-PRMTRC EQ1 FREQ", _CUT(100, 100, 7)), (129, "P-PRMTRC EQ1 LEVEL", _EQLEV),
+    (130, "P-PRMTRC EQ1 BWTH", _EQBW),
+    (131, "P-PRMTRC EQ2 FREQ", _CUT(700, 100, 9)), (132, "P-PRMTRC EQ2 LEVEL", _EQLEV),
+    (133, "P-PRMTRC EQ2 BWTH", _EQBW),
+    (134, "P-PRMTRC EQ3 FREQ", _CUT(1500, 100, 18)), (135, "P-PRMTRC EQ3 LEVEL", _EQLEV),
+    (136, "P-PRMTRC EQ3 BWTH", _EQBW),
+    (137, "HF TX MAX POWER", _N(5, 100, 1, 3, "W")),
+    (138, "50M TX MAX POWER", _N(5, 100, 1, 3, "W")),
+    (139, "144M TX MAX POWER", _N(5, 50, 1, 3, "W")),
+    (140, "430M TX MAX POWER", _N(5, 50, 1, 3, "W")),
+    (141, "TUNER SELECT", _O("OFF", "INTERNAL", "EXTERNAL", "ATAS", "LAMP")),
+    (142, "VOX SELECT", _O("MIC", "DATA")),
+    (143, "VOX GAIN", _LEVEL), (144, "VOX DELAY", _N(30, 3000, 10, 4, "msec")),
+    (145, "ANTI VOX GAIN", _LEVEL),
+    (146, "DATA VOX GAIN", _LEVEL), (147, "DATA VOX DELAY", _N(30, 3000, 10, 4, "msec")),
+    (148, "ANTI DVOX GAIN", _LEVEL),
+    (149, "EMERGENCY FREQ TX", _DISEN),
+    (150, "PRT/WIRES FREQ", _O("MANUAL", "PRESET")),
+    # the manual gives 00030000 to 47000000 with no unit (the radio reaches 470 MHz, so a step is
+    # most likely 10 Hz); it is shown as the plain number the radio uses
+    (151, "PRESET FREQUENCY", _N(30000, 47000000, 1, 8)),
+    (152, "SEARCH SETUP", _O("HISTORY", "ACTIVITY")),
+    (153, "WIRES DG-ID", _N(0, 99, 1, 2, "", zero="AUTO")),
+]
+MENU = {f"{n:03d}": dict(spec, num=f"{n:03d}", name=name) for n, name, spec in _MENU_SPECS}
+
+# The sections of the Settings tab: (title, first item, last item)
+MENU_GROUPS = [
+    ("AGC, display, general", 1, 9), ("Voice memory (DVS)", 10, 11),
+    ("CW keyer, memories", 12, 22), ("Noise blanker", 23, 25),
+    ("Beep, clock, CAT", 26, 33), ("Memory, split, timers", 34, 40),
+    ("AM", 41, 49), ("CW", 50, 61), ("Data modes", 62, 73),
+    ("FM, repeaters", 74, 86), ("Digital, ID", 87, 91),
+    ("RTTY", 92, 101), ("SSB", 102, 110),
+    ("Filters, contour", 111, 118), ("Parametric equalizer", 119, 136),
+    ("TX power, tuner", 137, 141), ("VOX", 142, 148),
+    ("Emergency, WIRES-X", 149, 153),
+]
+
+
+def menu_group_title(index):
+    title, first, last = MENU_GROUPS[index]
+    return f"{title}  {first:03d}-{last:03d}"
+
+# Items that ask first, and why
+MENU_WARN = {
+    "031": "CAT RATE sets the speed of the radio's CAT port. The radio switches at once, and "
+           "the panel (and ser2net) keep using the old speed, so the connection will stop working "
+           "until they are set to match.",
+    "032": "CAT TOT sets how long the radio waits for the end of a CAT command. A very short time "
+           "can make it ignore commands from a remote connection.",
+    "033": "With CAT RTS enabled the radio only listens to CAT while the RTS line is set. A "
+           "connection through ser2net usually does not control that line, so the panel may "
+           "lose control of the radio.",
+    "039": "REF FREQ ADJ moves the radio's frequency reference, which shifts every frequency it "
+           "transmits and receives. Change it only if you can measure the result.",
+    "149": "EMERGENCY FREQ TX ENABLE lets the radio transmit on the emergency frequencies.",
+}
+
+
+def menu_decode(item, raw):
+    """The value in a radio reply as a number (num, sgn, hz, time zone in minutes) or the text."""
+    kind = item["kind"]
+    try:
+        if kind in ("num", "hz"):
+            return int(raw)
+        if kind == "sgn":
+            return (-1 if raw[0] == "-" else 1) * int(raw[1:])
+    except (ValueError, IndexError):
+        return None
+    return raw
+
+
+def menu_encode(item, value, width=None):
+    """The text to send for a value; width is the width of the radio's own last reply."""
+    kind = item["kind"]
+    if kind in ("num", "hz"):
+        return f"{int(round(value)):0{width or item['digits']}d}"
+    if kind == "sgn":
+        return ("-" if value < 0 else "+") + f"{abs(int(round(value))):0{(width or item['digits']) - 1}d}"
+    return str(value)
+
+
+def menu_text(item, value):
+    """A value as shown next to a slider."""
+    if value is None:
+        return "?"
+    if item["kind"] == "num":
+        if item.get("zero") is not None and value == 0:
+            return item["zero"]
+        shown = f"{value * item['scale']:.1f}" if item.get("scale") else str(int(value))
+        return f"{shown} {item['unit']}".strip()
+    if item["kind"] == "sgn":
+        return f"{int(value):+d} {item['unit']}".strip()
+    return str(value)
+
+
+class SettingsTab(ttk.Frame):
+    """The radio's menu, items 001 to 153: read each item from the radio and change it, as the
+    radio's own menu does. It needs the raw CAT connection (Hamlib has no way to reach the menu).
+
+    Two-choice items that are OFF/ON or DISABLE/ENABLE are a check box, other lists are a pull-down,
+    numbers are a slider (or an entry for the very wide ranges), and the frequency is an entry in
+    MHz. A change is written at once and read back, so what is shown is always what the radio
+    says. Nothing is written while the radio transmits, and a few items ask first."""
+
+    TOGGLES = (("OFF", "ON"), ("DISABLE", "ENABLE"))
+
+    def __init__(self, parent, panel):
+        super().__init__(parent, padding=(6, 4))
+        ttk.Style().configure("Compact.TButton", padding=(5, 1), width=0)
+        self.panel = panel
+        self.columnconfigure(0, weight=1)
+        self.rows = {}            # menu number -> how it is drawn
+        self.group_frames = {}
+        self.shown = {}           # menu number -> the raw value that is on screen
+        self.busy = set()         # items the user is changing right now
+        self.pending = {}         # menu number -> (value written, time) until the radio answers
+        self.group_index = None
+        self.last_refresh = 0.0
+        self.requested = set()    # sections already read from the radio since it connected
+        self.was_talking = False
+
+        top = ttk.Frame(self)
+        top.grid(row=0, column=0, sticky="ew")
+        ttk.Label(top, text="Section:").grid(row=0, column=0)
+        self.group_var = tk.StringVar()
+        self.group_cb = ttk.Combobox(top, textvariable=self.group_var, state="readonly", width=27,
+                                     values=[menu_group_title(i) for i in range(len(MENU_GROUPS))])
+        self.group_cb.grid(row=0, column=1, padx=4)
+        self.group_cb.bind("<<ComboboxSelected>>", lambda e: self.show_group(self.group_cb.current()))
+        buttons = ttk.Frame(top)                       # on their own line, to keep the tab narrow
+        buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ttk.Button(buttons, text="Read section", style="Compact.TButton",
+                   command=self.read_section).grid(row=0, column=0, padx=(0, 4))
+        ttk.Button(buttons, text="Read all 153", style="Compact.TButton",
+                   command=self.read_all).grid(row=0, column=1, padx=2)
+        self.status = tk.StringVar()
+        ttk.Label(self, textvariable=self.status, foreground="#555555", wraplength=430,
+                  justify="left").grid(row=1, column=0, sticky="w", pady=(3, 3))
+        box = ttk.Frame(self)
+        box.grid(row=2, column=0, sticky="nsew")
+        box.columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(box, height=300, highlightthickness=0, yscrollincrement=20)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(box, orient="vertical", command=self.canvas.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=sb.set)
+        self.inner = ttk.Frame(self.canvas)
+        self.window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>",
+                        lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.window, width=e.width))
+        self._bind_wheel(self.canvas)
+        self._bind_wheel(self.inner)
+        self.group_cb.current(0)
+        self.show_group(0, read=False)
+
+    # ---- scrolling: the wheel scrolls the list and never changes a setting -------------
+    def _bind_wheel(self, widget):
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(seq, self._wheel)
+
+    def _wheel(self, event):
+        if getattr(event, "num", None) == 4:
+            step = -1
+        elif getattr(event, "num", None) == 5:
+            step = 1
+        else:
+            step = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(step * 2, "units")
+        return "break"             # a combo box under the pointer must not take the wheel
+
+    # ---- sections and rows ---------------------------------------------------------------
+    def numbers(self, index=None):
+        if index is None:
+            return sorted(MENU)
+        _, first, last = MENU_GROUPS[index]
+        return [f"{n:03d}" for n in range(first, last + 1)]
+
+    def show_group(self, index, read=True):
+        if self.group_index is not None:
+            self.group_frames[self.group_index].grid_remove()
+        self.group_index = index
+        frame = self.group_frames.get(index) or self.build_group(index)
+        frame.grid(row=0, column=0, sticky="ew")
+        self.canvas.yview_moveto(0)
+        self.group_var.set(menu_group_title(index))
+        for num in self.numbers(index):
+            self.shown.pop(num, None)               # draw the latest values again
+        if read:
+            self.read_section()
+
+    def build_group(self, index):
+        frame = ttk.Frame(self.inner)
+        frame.columnconfigure(0, minsize=190)
+        self._bind_wheel(frame)
+        for r, num in enumerate(self.numbers(index)):
+            self.add_row(frame, r, MENU[num])
+        self.group_frames[index] = frame
+        return frame
+
+    def add_row(self, frame, r, item):
+        num, kind = item["num"], item["kind"]
+        label = ttk.Label(frame, text=f"{num}  {item['name']}", anchor="w")
+        label.grid(row=r, column=0, sticky="w", pady=1)
+        row = dict(item=item)
+        extra = []
+        if kind == "opt":
+            labels = list(item["opts"].values())
+            if tuple(labels) in self.TOGGLES:
+                var = tk.IntVar(value=0)
+                chk = ttk.Checkbutton(frame, variable=var, command=lambda n=num: self.on_toggle(n))
+                chk.grid(row=r, column=1, sticky="w")
+                lbl = ttk.Label(frame, text="", width=10)
+                lbl.grid(row=r, column=2, sticky="w")
+                row.update(ui="toggle", var=var, lbl=lbl)
+                extra = [chk, lbl]
+            else:
+                var = tk.StringVar()
+                cb = ttk.Combobox(frame, textvariable=var, values=labels, state="readonly", width=17)
+                cb.grid(row=r, column=1, columnspan=2, sticky="w")
+                cb.bind("<<ComboboxSelected>>", lambda e, n=num: self.on_choose(n))
+                row.update(ui="choice", var=var)
+                extra = [cb]
+        elif kind in ("num", "sgn") and (item["hi"] - item["lo"]) / item["step"] <= 1000:
+            var = tk.DoubleVar(value=item["lo"])
+            sc = ttk.Scale(frame, from_=item["lo"], to=item["hi"], variable=var, length=150,
+                           command=lambda v, n=num: self.on_slide(n))
+            sc.grid(row=r, column=1, sticky="w")
+            lbl = ttk.Label(frame, text="", width=11)
+            lbl.grid(row=r, column=2, sticky="w")
+            sc.bind("<ButtonPress-1>", lambda e, n=num: self.busy.add(n))
+            sc.bind("<ButtonRelease-1>", lambda e, n=num: self.on_slide_done(n))
+            sc.bind("<KeyRelease>", lambda e, n=num: self.on_slide_done(n))
+            row.update(ui="slider", var=var, lbl=lbl)
+            extra = [sc, lbl]
+        elif kind in ("num", "hz"):
+            var = tk.StringVar()
+            ent = ttk.Entry(frame, textvariable=var, width=12)
+            ent.grid(row=r, column=1, sticky="w")
+            unit = "MHz" if kind == "hz" else (item["unit"] or f"{item['lo']} to {item['hi']}")
+            lbl = ttk.Label(frame, text=unit)
+            lbl.grid(row=r, column=2, sticky="w")
+            ent.bind("<Return>", lambda e, n=num: self.on_entry(n))
+            ent.bind("<FocusIn>", lambda e, n=num: self.busy.add(n))
+            ent.bind("<FocusOut>", lambda e, n=num: self.entry_left(n))
+            row.update(ui="entry", var=var)
+            extra = [ent, lbl]
+        else:                                           # read only
+            var = tk.StringVar()
+            lbl = ttk.Label(frame, textvariable=var)
+            lbl.grid(row=r, column=1, columnspan=2, sticky="w")
+            row.update(ui="ro", var=var)
+            extra = [lbl]
+        for w in [label] + extra:
+            self._bind_wheel(w)
+        self.rows[num] = row
+
+    # ---- what is on screen ------------------------------------------------------------------
+    @staticmethod
+    def entry_text(item, raw):
+        try:
+            return f"{int(raw) / 1_000_000:.6f}" if item["kind"] == "hz" else str(int(raw))
+        except ValueError:
+            return raw
+
+    @staticmethod
+    def describe(item, raw):
+        if item["kind"] == "opt":
+            return item["opts"].get(raw, raw)
+        if item["kind"] == "hz":
+            return SettingsTab.entry_text(item, raw) + " MHz"
+        if item["kind"] in ("num", "sgn"):
+            return menu_text(item, menu_decode(item, raw))
+        return raw
+
+    def set_widget(self, num, raw):
+        row, item = self.rows[num], self.rows[num]["item"]
+        ui = row["ui"]
+        if ui == "toggle":
+            row["var"].set(1 if raw == list(item["opts"])[1] else 0)
+            row["lbl"].configure(text=item["opts"].get(raw, f"({raw})"))
+        elif ui == "choice":
+            row["var"].set(item["opts"].get(raw, f"(unknown value {raw})"))
+        elif ui == "slider":
+            value = menu_decode(item, raw)
+            if value is not None:
+                row["var"].set(max(item["lo"], min(item["hi"], value)))
+            row["lbl"].configure(text=menu_text(item, value))
+        elif ui == "entry":
+            row["var"].set(self.entry_text(item, raw))
+        else:
+            row["var"].set(raw)
+
+    def refresh(self):
+        """Called often by the panel while this tab is showing: bring the screen in line with
+        what the radio has said, and check that writes were accepted."""
+        now = time.monotonic()
+        if now - self.last_refresh < 0.3:
+            return
+        self.last_refresh = now
+        radio = self.panel.radio
+        talking = self.can_talk()
+        if talking != self.was_talking:                 # (re)connected: read what is shown again
+            self.was_talking = talking
+            self.requested.clear()
+        if talking and self.group_index not in self.requested:
+            self.read_section()
+        vals, times = radio.menu_snapshot()
+        for num, (payload, when) in list(self.pending.items()):
+            item = MENU[num]
+            if times.get(num, 0.0) > when:
+                got = vals.get(num)
+                if got != payload and not (got is not None and
+                                           menu_decode(item, got) == menu_decode(item, payload)):
+                    self.panel.append_log(f"Menu {num} {item['name']}: the radio did not accept "
+                                          f"{self.describe(item, payload)}; it says "
+                                          f"{self.describe(item, got) if got else '?'}")
+                    self.shown.pop(num, None)           # put the control back to what the radio kept
+                del self.pending[num]
+            elif now - when > 5.0:
+                self.panel.append_log(f"Menu {num} {item['name']}: no answer from the radio")
+                self.shown.pop(num, None)
+                del self.pending[num]
+        for num, row in self.rows.items():
+            raw = vals.get(num)
+            if raw is None or num in self.busy or self.shown.get(num) == raw:
+                continue
+            self.shown[num] = raw
+            self.set_widget(num, raw)
+        if radio.units != "raw":
+            self.status.set("The Settings tab needs the Raw CAT connection. You are using Hamlib, "
+                            "which cannot reach the radio's menu.")
+        elif not radio.connected:
+            self.status.set("Not connected to the radio.")
+        else:
+            here = self.numbers(self.group_index)
+            self.status.set(f"{sum(1 for n in here if n in vals)} of {len(here)} items in this "
+                            f"section read; {len(vals)} of 153 in all. A change is written to "
+                            "the radio as soon as you make it.")
+
+    # ---- reading ------------------------------------------------------------------------------
+    def can_talk(self):
+        radio = self.panel.radio
+        return radio.units == "raw" and radio.connected
+
+    def read_section(self):
+        if self.can_talk():
+            self.requested.add(self.group_index)
+            self.panel.radio.read_menus(self.numbers(self.group_index))
+
+    def read_all(self):
+        if self.can_talk():
+            self.panel.radio.read_menus(self.numbers())
+            self.panel.append_log("Reading all 153 menu items from the radio (a few seconds)")
+
+    # ---- writing ------------------------------------------------------------------------------
+    def width_for(self, num):
+        vals, _ = self.panel.radio.menu_snapshot()
+        raw = vals.get(num)
+        return len(raw) if raw else None            # the radio's own reply decides the width
+
+    def restore(self, num):
+        self.shown.pop(num, None)                   # draw what the radio says again
+        self.busy.discard(num)
+
+    def commit(self, num, payload):
+        p, item = self.panel, MENU[num]
+        if not self.can_talk():
+            messagebox.showinfo("Settings", "The Settings tab needs the Raw CAT connection to the "
+                                            "radio.")
+            return self.restore(num)
+        if p.radio.snapshot().get("ptt"):
+            messagebox.showinfo("Settings", "The radio is transmitting. Change menu items while it "
+                                            "is receiving.")
+            return self.restore(num)
+        if self.shown.get(num) == payload:
+            return
+        warn = MENU_WARN.get(num)
+        if warn and not messagebox.askokcancel(f"{num} {item['name']}", warn + "\n\nChange it anyway?"):
+            return self.restore(num)
+        p.radio.write_menu(num, payload)
+        self.pending[num] = (payload, time.monotonic())
+        p.append_log(f"Menu {num} {item['name']} set to {self.describe(item, payload)}")
+
+    def on_toggle(self, num):
+        keys = list(MENU[num]["opts"])
+        self.commit(num, keys[1] if self.rows[num]["var"].get() else keys[0])
+
+    def on_choose(self, num):
+        item = MENU[num]
+        label = self.rows[num]["var"].get()
+        key = next((k for k, v in item["opts"].items() if v == label), None)
+        if key is None:
+            return self.restore(num)
+        self.commit(num, key)
+
+    @staticmethod
+    def quantize(item, value):
+        value = item["lo"] + round((float(value) - item["lo"]) / item["step"]) * item["step"]
+        return max(item["lo"], min(item["hi"], value))
+
+    def on_slide(self, num):
+        item, row = MENU[num], self.rows[num]
+        row["lbl"].configure(text=menu_text(item, self.quantize(item, row["var"].get())))
+
+    def on_slide_done(self, num):
+        self.busy.discard(num)
+        item = MENU[num]
+        value = self.quantize(item, self.rows[num]["var"].get())
+        self.commit(num, menu_encode(item, value, self.width_for(num)))
+
+    def entry_left(self, num):
+        self.busy.discard(num)
+        self.restore(num)                            # an edit that was not confirmed with Return
+
+    def on_entry(self, num):
+        item, row = MENU[num], self.rows[num]
+        text = row["var"].get().strip()
+        try:
+            value = round(float(text) * 1_000_000) if item["kind"] == "hz" else int(text)
+        except ValueError:
+            messagebox.showinfo("Settings", f"'{text}' is not a number.")
+            return self.restore(num)
+        if not item["lo"] <= value <= item["hi"]:
+            low, high = ((f"{item['lo'] / 1e6:g}", f"{item['hi'] / 1e6:g} MHz") if item["kind"] == "hz"
+                         else (item["lo"], item["hi"]))
+            messagebox.showinfo("Settings", f"{item['name']} must be from {low} to {high}.")
+            return self.restore(num)
+        self.busy.discard(num)
+        self.commit(num, menu_encode(item, value, self.width_for(num)))
+
+
 class MeterBar(tk.Canvas):
-    def __init__(self, master, width=430, height=13):
+    def __init__(self, master, width=430, height=7):
         super().__init__(master, width=width, height=height, highlightthickness=1,
                          highlightbackground="#888", background="#ececec")
         self.frac, self.peak, self.color = 0.0, None, BLUE
@@ -1587,7 +2209,7 @@ class MeterBar(tk.Canvas):
         self.create_rectangle(0, 0, w * self.frac, h, fill=self.color, width=0)
         for i in range(1, 10):
             x = w * i / 10
-            self.create_line(x, h - 4, x, h, fill="#777")
+            self.create_line(x, h - 3, x, h, fill="#777")
         if self.peak is not None and self.peak > 0:
             x = min(w - 2, w * min(1.0, self.peak))
             self.create_line(x, 0, x, h, fill="#222", width=2)
@@ -1810,7 +2432,7 @@ class FreqDisplay(tk.Frame):
 class Panel:
     def __init__(self, root, args):
         self.root = root
-        root.title("FT-991A Remote Panel")
+        root.title(f"FT-991A Remote Panel {__version__}")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.cfg = load_cfg()
         self.logq = queue.SimpleQueue()
@@ -1847,6 +2469,7 @@ class Panel:
         self.mode_var = tk.StringVar()
         self.power_var = tk.StringVar()
         self.po_peak, self.po_peak_t = 0.0, 0.0
+        self._atu_led_color = None
         self.band_hf = True
         self.pending_power = (None, 0.0)
         self.pending_mode = (None, 0.0)
@@ -1875,6 +2498,7 @@ class Panel:
         outer.rowconfigure(2, weight=1)
         self.nb = ttk.Notebook(outer)               # tabs: Radio, Audio
         self.nb.grid(row=0, column=0, sticky="ew")
+        self.nb.bind("<<NotebookTabChanged>>", lambda e: self.fit_window(shrink=True))
         main = ttk.Frame(self.nb, padding=6)
         main.columnconfigure(0, weight=1)
         self.nb.add(main, text="Radio")
@@ -1964,18 +2588,26 @@ class Panel:
         self.power_cb.bind("<<ComboboxSelected>>", self.on_power)
         g = ttk.Frame(f)
         g.grid(row=1, column=0, columnspan=5, sticky="w", pady=(4, 0))
-        self.tuner_btn = ttk.Button(g, text="ATU: --", width=9, command=self.on_tuner)
-        self.tuner_btn.grid(row=0, column=0, padx=(0, 3))
-        self.tune_btn = ttk.Button(g, text="Tune", width=6, command=self.on_tune)
-        self.tune_btn.grid(row=0, column=1, padx=3)
-        self.split_btn = ttk.Button(g, text="Split: --", width=9, command=self.on_split)
-        self.split_btn.grid(row=0, column=2, padx=3)
-        self.pon_btn = ttk.Button(g, text="Power on", width=8,
+        # ttk buttons are at least 11 characters wide unless told otherwise; width=0 means "as wide
+        # as the label"
+        ttk.Style().configure("Compact.TButton", padding=(5, 1), width=0)
+        # a light for the antenna tuner: green when it is off, yellow when it is in line
+        self.atu_led = tk.Canvas(g, width=16, height=16, highlightthickness=0)
+        self.atu_led.grid(row=0, column=0, padx=(0, 3))
+        self.atu_dot = self.atu_led.create_oval(2, 2, 14, 14, fill=GREY, outline="#555")
+        self.tuner_btn = ttk.Button(g, text="ATU", style="Compact.TButton", command=self.on_tuner)
+        self.tuner_btn.grid(row=0, column=1, padx=(0, 3))
+        self.tune_btn = ttk.Button(g, text="Tune", style="Compact.TButton", command=self.on_tune)
+        self.tune_btn.grid(row=0, column=2, padx=2)
+        self.split_btn = ttk.Button(g, text="Split: --", style="Compact.TButton",
+                                    command=self.on_split)
+        self.split_btn.grid(row=0, column=3, padx=2)
+        self.pon_btn = ttk.Button(g, text="Power on", style="Compact.TButton",
                                   command=lambda: self.on_power_switch(True))
-        self.pon_btn.grid(row=0, column=3, padx=(10, 3))
-        self.poff_btn = ttk.Button(g, text="Power off", width=8,
+        self.pon_btn.grid(row=0, column=4, padx=(8, 2))
+        self.poff_btn = ttk.Button(g, text="Power off", style="Compact.TButton",
                                    command=lambda: self.on_power_switch(False))
-        self.poff_btn.grid(row=0, column=4, padx=3)
+        self.poff_btn.grid(row=0, column=5, padx=2)
 
         # ---- bandwidth
         bf = ttk.Frame(main)
@@ -2017,18 +2649,25 @@ class Panel:
         self.bars, self.texts = {}, {}
         for i, (key, label) in enumerate((("s", "S meter"), ("po", "Power"),
                                           ("swr", "SWR"), ("alc", "ALC"))):
-            ttk.Label(m, text=label + ":").grid(row=i, column=0, sticky="e", pady=1)
+            ttk.Label(m, text=label + ":").grid(row=i, column=0, sticky="e", pady=0)
             bar = MeterBar(m, width=170)
             bar.grid(row=i, column=1, sticky="ew", padx=6)
             txt = tk.StringVar(value="--")
             ttk.Label(m, textvariable=txt, width=17).grid(row=i, column=2, sticky="w")
             self.bars[key], self.texts[key] = bar, txt
+        # the same two level meters as on the Audio tab: audio from the radio, and your microphone
+        ttk.Label(m, text="Audio in:").grid(row=4, column=0, sticky="e", pady=0)
+        self.r_rx_bar = MeterBar(m, width=170)
+        self.r_rx_bar.grid(row=4, column=1, sticky="ew", padx=6)
+        ttk.Label(m, text="Mic:").grid(row=5, column=0, sticky="e", pady=0)
+        self.r_tx_bar = MeterBar(m, width=170)
+        self.r_tx_bar.grid(row=5, column=1, sticky="ew", padx=6)
         # calibration: a small toggle; its buttons appear on the line below when wanted
         self.cal_toggle = ttk.Button(m, text="Calibration", width=12, command=self.toggle_cal)
-        self.cal_toggle.grid(row=4, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        self.cal_toggle.grid(row=6, column=0, columnspan=2, sticky="w", pady=(3, 0))
         b = ttk.Frame(m)
         self.cal_frame = b
-        b.grid(row=5, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        b.grid(row=7, column=0, columnspan=3, sticky="w", pady=(3, 0))
         ttk.Button(b, text="Cal PO", width=7, command=lambda: self.calibrate("po")).grid(
             row=0, column=0, padx=1)
         ttk.Button(b, text="Cal SWR", width=7, command=lambda: self.calibrate("swr")).grid(
@@ -2054,6 +2693,8 @@ class Panel:
         sb.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=sb.set)
         self.update_cal_text()
+        self.settings_tab = SettingsTab(self.nb, self)
+        self.nb.add(self.settings_tab, text="Settings")
 
     # ---- Audio tab: four endpoints, as in FreeDV's audio settings ------------------------
     HINT_REMOTE = ("Remote: the bridge on the server carries the radio's audio. A radio end set to "
@@ -2068,8 +2709,9 @@ class Panel:
         self.a_tx_cable, self.mic_on, self.audio_ready = False, False, AUDIO_OK
         self.a_disp = {"rx": 0.0, "tx": 0.0}
         self.a_diag = {"net": 0, "cable": 0, "spk": 0}      # receive peaks over the last second
-        self.a_txdiag = {"mic": 0, "sent": 0}               # transmit peaks over the last second
+        self.a_txdiag = {"mic": 0, "sent": 0, "alc": 0.0, "tx": 0}   # transmit peaks, last second
         self.a_tick, self.a_was_linked = 0, False
+        self.a_detail_text = ""
         if not AUDIO_OK:
             ttk.Label(tab, justify="left", wraplength=380, text=(
                 "Audio streaming is not available:\n" + str(AUDIO_ERR) + "\n\nInstall the "
@@ -2239,6 +2881,11 @@ class Panel:
 
         ttk.Label(tab, textvariable=self.audio_status, wraplength=380, justify="left").grid(
             row=17, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Button(tab, text="Copy report", width=12, command=self.copy_report).grid(
+            row=18, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(tab, text="Copies the settings, status and log, to paste into a message.",
+                  foreground="#666666", wraplength=250, justify="left").grid(
+            row=18, column=1, columnspan=2, sticky="w", padx=4, pady=(4, 0))
         self.a_hint.set(self.HINT_REMOTE if self.audio_mode.get() == "remote" else self.HINT_LOCAL)
         self.apply_adv_visibility()
         self.refresh_audio_devices(reinit=False)
@@ -2263,10 +2910,7 @@ class Panel:
     def toggle_adv(self):
         self.a_show_adv = not self.a_show_adv
         self.apply_adv_visibility()
-        r = self.root                       # grow the window to fit when the options open
-        r.update_idletasks()
-        if r.winfo_reqheight() > r.winfo_height():
-            r.geometry(f"{r.winfo_width()}x{r.winfo_reqheight()}")
+        self.fit_window(shrink=True)
         self.save_cfg()
 
     def apply_adv_visibility(self):
@@ -2590,6 +3234,7 @@ class Panel:
         self.a_was_linked = False
         self.audio_status.set("Connecting..." if remote else "Local audio running.")
         self.update_adv_states()
+        self.fit_window()
         where = f"to {host}:{port}" if remote else "locally"
         self.append_log(f"Audio started {where} ("
                         + ("microphone muted" if self.has_mic_path() else "listen only") + ")")
@@ -2606,8 +3251,8 @@ class Panel:
             self.a_btn.configure(text="Start audio")
             self.update_adv_states()
             self.audio_status.set("Stopped")
-            self.a_rx_bar.set(0, GREY)
-            self.a_tx_bar.set(0, GREY)
+            for bar in (self.a_rx_bar, self.r_rx_bar, self.a_tx_bar, self.r_tx_bar):
+                bar.set(0, GREY)
             self.append_log("Audio stopped")
 
     def apply_rx_gain(self):
@@ -2683,7 +3328,7 @@ class Panel:
     def transmit_diagnosis(self):
         """Peak levels (percent of full scale) on the transmit side over the last second."""
         node, txr = self.audio_node, self.tx_router
-        d, self.a_txdiag = self.a_txdiag, {"mic": 0, "sent": 0}
+        d, self.a_txdiag = self.a_txdiag, {"mic": 0, "sent": 0, "alc": 0.0, "tx": 0}
         pct = lambda v: f"{v * 100 // 32768}%"
         if txr is None:
             if node is not None and not node.args.rx_only:       # only a program on the cable (FreeDV)
@@ -2692,8 +3337,17 @@ class Panel:
         parts = [f"microphone {pct(d['mic'])} ({'Mic ON' if self.mic_on else 'Mic muted'})",
                  (f"sent to the server {pct(d['sent'])}" if node is not None
                   else f"to the radio {pct(d['sent'])}")]
+        if d["tx"]:
+            parts.append(f"radio ALC {d['alc'] * 100:.0f}%")
         hint = ""
-        if self.mic_on:
+        snap = self.radio.snapshot()
+        if (self.mic_on and d["tx"] >= 8 and d["sent"] > 0 and d["alc"] < 0.06
+                and snap.get("mode") in ("USB", "LSB", "PKTUSB", "PKTLSB")):
+            hint = (" Your audio is leaving the panel, but the radio's ALC is not moving, so the "
+                    "audio is not reaching the radio, or is far too quiet. On the radio's computer, "
+                    "check that the sound card's volume is up and not muted, and that the bridge "
+                    "uses the right output device; then the radio's own settings for this mode.")
+        elif self.mic_on:
             if d["mic"] == 0:
                 hint = (" The microphone is silent: check the microphone and its level in the "
                         "system sound settings, and that this program may use the microphone "
@@ -2719,6 +3373,10 @@ class Panel:
                 rx_peak = p
                 dg["spk"] = max(dg["spk"], p)
         td = self.a_txdiag
+        snap = self.radio.snapshot()
+        if snap.get("ptt"):                               # the radio's ALC shows audio reaching it
+            td["tx"] += 1
+            td["alc"] = max(td["alc"], self.alc_fraction(snap, self.radio.units == "raw"))
         if txr is not None:
             tx_peak, txr.peak = txr.peak, 0
             mic, txr.peak_in = txr.peak_in, 0
@@ -2732,35 +3390,126 @@ class Panel:
             td["sent"] = max(td["sent"], tx_peak)
         self.a_disp["rx"] = max(level_pct(rx_peak), self.a_disp["rx"] - 0.06)
         self.a_disp["tx"] = max(level_pct(tx_peak), self.a_disp["tx"] - 0.06)
-        self.a_rx_bar.set(self.a_disp["rx"], BLUE if self.a_disp["rx"] < 0.9 else AMBER)
-        self.a_tx_bar.set(self.a_disp["tx"], GREEN if (self.mic_on or txr is None) else GREY)
+        rx_color = BLUE if self.a_disp["rx"] < 0.9 else AMBER
+        tx_color = GREEN if (self.mic_on or txr is None) else GREY
+        for bar in (self.a_rx_bar, self.r_rx_bar):
+            bar.set(self.a_disp["rx"], rx_color)
+        for bar in (self.a_tx_bar, self.r_tx_bar):
+            bar.set(self.a_disp["tx"], tx_color)
         self.a_tick += 1
         if self.a_tick % 10:                            # the text below changes about once a second
             return
-        lines = []
+        head, detail = [], []
         if node is not None:
             st = node.stats()
             if st["linked"] != self.a_was_linked:
                 self.a_was_linked = st["linked"]
                 self.append_log("Audio link up" if st["linked"] else "Audio link lost")
-            lines.append(("Connected to the server." if st["linked"] else "No data from the server.")
-                         + f"\nRX {st['rx']} packets; lost {st['lost']} ({st['loss_events']} events, "
-                         f"longest {st['max_gap']}); late {st['late']}; bad {st['bad']}; underruns "
-                         f"{st['underruns']}; dropped {st['dropped']}; buffer {st['buf']} frames.\n"
-                         f"TX {st['tx_kbps']:.0f} kbps ({st['tx_pkts']} packets, errors "
-                         f"{st['tx_err']}); send timing {st['tx_tight']} too close, {st['tx_slow']} "
-                         f"too late, longest gap {st['tx_gap_max']:.0f} ms.")
+            head.append("Connected to the server." if st["linked"] else "No data from the server.")
+            detail.append(f"RX {st['rx']} packets; lost {st['lost']} ({st['loss_events']} events, "
+                          f"longest {st['max_gap']}); late {st['late']}; bad {st['bad']}; underruns "
+                          f"{st['underruns']}; dropped {st['dropped']}; buffer {st['buf']} frames.")
+            detail.append(f"TX {st['tx_kbps']:.0f} kbps ({st['tx_pkts']} packets, errors "
+                          f"{st['tx_err']}); send timing {st['tx_tight']} too close, {st['tx_slow']} "
+                          f"too late, longest gap {st['tx_gap_max']:.0f} ms.")
         else:
-            lines.append("Local audio running.")
+            head.append("Local audio running.")
         for r in (rxr, txr):
             if r is not None:
-                lines.append(f"{r.name.capitalize()} path: underruns {r.underruns}, dropped "
-                             f"{r.dropped}.")
-        lines.append(self.receive_diagnosis())
+                detail.append(f"{r.name.capitalize()} path: underruns {r.underruns}, dropped "
+                              f"{r.dropped}.")
+        levels = [self.receive_diagnosis()]
         tx = self.transmit_diagnosis()
         if tx:
-            lines.append(tx)
-        self.audio_status.set("\n".join(lines))
+            levels.append(tx)
+        # the levels say where the audio stops, so they come first. The packet counters are shown
+        # only while Advanced is open (a report always includes them).
+        self.a_detail_text = "\n".join(detail)
+        self.audio_status.set("\n".join(head + levels + (detail if self.a_show_adv else [])))
+        self.fit_window()
+
+    def size_notebook(self):
+        """Make the notebook as tall as the tab that is showing. By default a ttk notebook is as
+        tall as its tallest tab, which left blank space under the shorter ones."""
+        try:
+            tab = self.nb.nametowidget(self.nb.select())
+        except (tk.TclError, KeyError):
+            return
+        self.root.update_idletasks()
+        want = tab.winfo_reqheight()
+        if int(self.nb.cget("height") or 0) != want:
+            self.nb.configure(height=want)
+
+    def fit_window(self, shrink=False):
+        """Fit the window to the tab that is showing: grow it when the content needs more room
+        (the status text changes length), and, after a tab change, shrink it so no space is
+        wasted."""
+        r = self.root
+        self.size_notebook()
+        r.update_idletasks()
+        need = min(r.winfo_reqheight(), r.winfo_screenheight() - 80)
+        if need > r.winfo_height() + 1 or (shrink and need < r.winfo_height() - 1):
+            r.geometry(f"{r.winfo_width()}x{need}")
+
+    def build_report(self):
+        """Settings, status and the recent log as plain text, to paste into a message. IPv4
+        addresses are hidden."""
+        def safe(fn):                      # a report must never fail because one detail is unreadable
+            try:
+                return fn()
+            except Exception as exc:
+                return f"(unavailable: {type(exc).__name__}: {exc})"
+
+        dev = {k: v.get() for k, v in (("radio to computer", self.a_radio_in),
+                                       ("computer to speaker", self.a_spk),
+                                       ("mic to computer", self.a_mic),
+                                       ("computer to radio", self.a_radio_out))}
+        snap = self.radio.snapshot()
+        log_lines = self.log.get("1.0", "end").strip().splitlines()[-30:]
+        lines = [
+            "FT-991A panel report",
+            f"panel version: {__version__}",
+            f"engine: {ENGINE_VERSION}",
+            f"python {sys.version.split()[0]} on {sys.platform}, "
+            f"packaged={bool(getattr(sys, 'frozen', False))}",
+            "sounddevice: " + (safe(lambda: f"ok, PortAudio {sd.get_portaudio_version()[1]}")
+                               if AUDIO_OK else str(AUDIO_ERR)),
+            f"opus: {'yes' if HAVE_OPUS else 'no'}, shipped copy: {_bundled_opus or 'none'}",
+            "",
+            f"radio audio: {self.audio_mode.get()}   running: {'yes' if self.audio_running() else 'no'}",
+            f"server: {self.audio_host.get().strip() or '(radio host)'}:{self.audio_port.get()}",
+            f"codec: {self.audio_codec.get()}, rate {self.audio_rate.get()}, frame "
+            f"{self.audio_frame.get()} ms, jitter {self.audio_jitter.get()} ms, "
+            f"smooth timing {self.audio_pace.get()}, stereo {self.audio_stereo.get()}",
+            *[f"{k}: {v}" for k, v in dev.items()],
+            f"Mic: {'ON' if self.mic_on else 'OFF'}   Mic level {self.a_tx_pct}%   Volume {self.a_rx_pct}%"
+            f"   mic path: {self.has_mic_path()}",
+            f"radio link: {'connected' if self.radio.connected else 'not connected'} "
+            f"({self.radio.units}); freq {snap.get('freq')}; mode {snap.get('mode')}; "
+            f"transmitting {snap.get('ptt')}; power {snap.get('po_w')}; alc {snap.get('alc')}",
+            "",
+            "status text:",
+            self.audio_status.get(),
+            self.a_detail_text,
+            "",
+            "log (last 30 lines):",
+            *log_lines,
+        ]
+        text = "\n".join(lines)
+        return re.sub(r"\b(?!127\.0\.0\.1\b)\d{1,3}(?:\.\d{1,3}){3}\b", "<ip address>", text)
+
+    def copy_report(self):
+        text = self.build_report()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update()
+        path = Path.home() / "ft991a_panel_report.txt"
+        try:
+            path.write_text(text, encoding="utf-8")
+            where = f" and saved as {path}"
+        except OSError:
+            where = ""
+        self.append_log(f"Report copied to the clipboard{where}")
 
     def apply_geometry(self):
         r = self.root
@@ -2776,6 +3525,7 @@ class Panel:
         else:
             r.geometry(f"{r.winfo_reqwidth()}x{r.winfo_reqheight()}")
         r.minsize(400, 360)
+        self.fit_window(shrink=True)
 
     # ---- helpers ------------------------------------------------------------------
     def append_log(self, msg):
@@ -2810,6 +3560,7 @@ class Panel:
     def toggle_cal(self):
         self.show_cal = not self.show_cal
         self.apply_cal_visibility()
+        self.fit_window(shrink=True)
         self.save_cfg()
 
     def apply_cal_visibility(self):
@@ -3393,10 +4144,12 @@ class Panel:
         self.tune_btn.configure(
             text="Stop tune" if (self.tune_deadline or s.get("tuning")) else "Tune")
         if self.tune_deadline or s.get("tuning"):
-            atu = "TUNING"
+            led = YELLOW if int(now * 3) % 2 else "#6b5a00"          # flashes while tuning
         else:
-            atu = "--" if s["tuner"] is None else "ON" if s["tuner"] else "OFF"
-        self.tuner_btn.configure(text="ATU: " + atu)
+            led = GREY if s["tuner"] is None else YELLOW if s["tuner"] else GREEN
+        if led != self._atu_led_color:
+            self._atu_led_color = led
+            self.atu_led.itemconfigure(self.atu_dot, fill=led)
 
         vhf = s["freq"] is not None and s["freq"] >= 100_000_000
         self.c4fm_btn.configure(
@@ -3406,6 +4159,8 @@ class Panel:
         self.update_agc(s, now)
         self.update_ptt()
         self.update_audio(now)
+        if self.nb.select() == str(self.settings_tab):
+            self.settings_tab.refresh()
         self.split_btn.configure(
             text="Split: " + ("--" if s["split"] is None else "ON" if s["split"] else "OFF"),
             state="normal" if (self.radio.can_split and self.radio.connected) else "disabled")
@@ -3414,6 +4169,12 @@ class Panel:
         self.poff_btn.configure(state=can)
         self.update_meters(s, fresh and transmitting, now)
         self._tick_id = self.root.after(100, self.tick)
+
+    @staticmethod
+    def alc_fraction(s, raw_mode):
+        """The ALC reading as a fraction of the radio's own meter scale (see ALC_SCALE)."""
+        raw = ((s["alc_raw"] or 0) / 255) if raw_mode else (s["alc"] or 0.0)
+        return min(1.0, raw * ALC_SCALE)
 
     def update_s_meter(self, s, now):
         rx_live = (self.radio.connected and not s["ptt"]
@@ -3480,14 +4241,28 @@ class Panel:
             self.bars["swr"].set(0, GREY)
             self.texts["swr"].set("--")
         # ALC
-        alc = ((s["alc_raw"] or 0) / 255) if raw_mode else (s["alc"] or 0.0)
+        alc = self.alc_fraction(s, raw_mode)
         if live:
-            color = RED if alc >= ALC_BAD else AMBER if alc >= ALC_WARN else GREEN
+            shown = round(100 * alc)                # the colour follows the number that is shown
+            color = RED if shown > 100 * ALC_BAD else AMBER if shown > 100 * ALC_WARN else GREEN
             self.bars["alc"].set(alc, color)
             self.texts["alc"].set(f"{100 * alc:.0f}%")
         else:
             self.bars["alc"].set(0, GREY)
             self.texts["alc"].set("--")
+
+
+def set_window_icon(root):
+    """Show the panel's icon on the window (the Dock on a Mac). A packaged app already has its
+    icon built in; this is for running the script directly from the repository."""
+    for d in _app_dirs():
+        path = os.path.join(d, "packaging", "icons", "ft991a_128.png")
+        if os.path.isfile(path):
+            try:
+                root.iconphoto(True, tk.PhotoImage(file=path))
+            except tk.TclError:
+                pass
+            return
 
 
 def run_selftest(path):
@@ -3506,6 +4281,7 @@ def run_selftest(path):
         if not ok:
             raise RuntimeError(why)
 
+    check("panel version", lambda: __version__)
     check("python", lambda: f"{sys.version.split()[0]} on {sys.platform}, "
                             f"packaged={bool(getattr(sys, 'frozen', False))}")
     check("tkinter and Tcl", lambda: "Tcl " + tk.Tcl().eval("info patchlevel"))
@@ -3532,6 +4308,7 @@ def run_selftest(path):
 
 def main():
     ap = argparse.ArgumentParser(description="FT-991A remote panel")
+    ap.add_argument("--version", action="version", version=f"FT-991A panel {__version__}")
     ap.add_argument("--host", help="server host (connects immediately)")
     ap.add_argument("--port", type=int, help="TCP port: rigctld (default 4532) or the ser2net port")
     ap.add_argument("--backend", choices=("hamlib", "cat"),
@@ -3543,6 +4320,7 @@ def main():
     if args.selftest:
         return run_selftest(args.selftest)
     root = tk.Tk()
+    set_window_icon(root)
 
     def show_error(exc_type, exc, tb):
         import traceback

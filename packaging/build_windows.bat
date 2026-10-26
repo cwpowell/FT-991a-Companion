@@ -6,7 +6,8 @@ rem
 rem You need Python 3.12 from python.org (it includes Tk). Run this from any folder.
 setlocal
 cd /d "%~dp0\.."
-if "%PANEL_VERSION%"=="" set PANEL_VERSION=1.0.0
+rem the version number lives in ft991a_panel.py (set PANEL_VERSION to override it)
+if "%PANEL_VERSION%"=="" for /f %%v in ('python packaging\version.py') do set PANEL_VERSION=%%v
 echo == Windows build, version %PANEL_VERSION%
 
 if not exist Contributions\opus.dll (

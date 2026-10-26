@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version number for the installers"
-        required: true
-        default: "1.0.0"
+        description: "Version number (leave empty to use the one in ft991a_panel.py)"
+        required: false
+        default: ""
       commit_files:
         description: "Also commit the built files into the MacOS and Windows folders"
         type: boolean
@@ -43,7 +43,9 @@ jobs:
       - name: Version number
         shell: bash
         run: |
-          V="${{ github.event.inputs.version || github.ref_name }}"
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
+          if [ -z "$V" ]; then V="$(python3 packaging/version.py)"; fi
           echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
       - name: Build the app and the disk image
         run: bash packaging/build_macos.sh
@@ -67,7 +69,9 @@ jobs:
       - name: Version number
         shell: bash
         run: |
-          V="${{ github.event.inputs.version || github.ref_name }}"
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
+          if [ -z "$V" ]; then V="$(python3 packaging/version.py)"; fi
           echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
       - name: Install Inno Setup
         shell: pwsh
@@ -99,7 +103,9 @@ jobs:
           merge-multiple: true
       - name: Version number
         run: |
-          V="${{ github.event.inputs.version || github.ref_name }}"
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
+          if [ -z "$V" ]; then V="$(python3 packaging/version.py)"; fi
           echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
       - name: Put the files in the MacOS and Windows folders
         if: github.event_name == 'workflow_dispatch' && inputs.commit_files

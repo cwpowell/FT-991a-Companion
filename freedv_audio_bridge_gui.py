@@ -102,6 +102,8 @@ class App:
         self.gain_db = {"in": tk.DoubleVar(value=float(cfg.get("in_gain_db", 0.0))),
                         "out": tk.DoubleVar(value=float(cfg.get("out_gain_db", 0.0)))}
         self.pace = bv(value=cfg.get("pace", True))
+        self.pin_vol = bv(value=cfg.get("pin_volumes", False))
+        self.pinner = None
         self.debug = bv(value=False)  # deliberately not remembered between runs
 
         self.build()
@@ -214,9 +216,12 @@ class App:
                             variable=self.pace)).grid(
             row=4, column=0, columnspan=6, sticky="w", pady=2)
         reg(ttk.Checkbutton(
+            f, text="Keep the radio's sound volumes at 100% (PulseAudio / PipeWire)",
+            variable=self.pin_vol)).grid(row=5, column=0, columnspan=6, sticky="w", pady=2)
+        reg(ttk.Checkbutton(
             f, text="Debug: save bridge_play.wav and bridge_capture.wav "
                     "in the home folder", variable=self.debug)).grid(
-            row=5, column=0, columnspan=6, sticky="w", pady=2)
+            row=6, column=0, columnspan=6, sticky="w", pady=2)
 
         # buttons
         f = ttk.Frame(main)
@@ -493,6 +498,7 @@ class App:
             opus_signal=self.opus_signal.get(),
             jitter_ms=self.jitter.get(), cbr=self.cbr.get(), fec=self.fec.get(),
             out_channels=self.out_ch.get(), pace=self.pace.get(), devices=self.dev_cfg,
+            pin_volumes=self.pin_vol.get(),
             geometry=self.root.geometry(),
             in_gain_db=self.gain_db["in"].get(), out_gain_db=self.gain_db["out"].get())
         try:
@@ -525,6 +531,9 @@ class App:
             return
         self.node = node
         self.was_linked = False
+        if self.pin_vol.get():
+            self.pinner = fb.PulsePinner(node, 100, 10.0, log=self.log_ts)
+            self.pinner.start()
         # the bridge started with these devices, so they are now the ones to remember
         self.want = {"in": self.dev_key.get(self.in_dev.get()),
                      "out": self.dev_key.get(self.out_dev.get())}
@@ -538,6 +547,9 @@ class App:
         if self.start_pending:
             self.start_pending = False
             self.append_log("Waiting cancelled")
+        if self.pinner is not None:
+            self.pinner.stop()
+            self.pinner = None
         if self.node is not None:
             self.node.stop()
             self.node = None
@@ -555,6 +567,8 @@ class App:
         except (AttributeError, tk.TclError):
             pass
         self.save_cfg()
+        if self.pinner is not None:
+            self.pinner.stop()
         if self.node is not None:
             self.node.stop()
         self.root.destroy()

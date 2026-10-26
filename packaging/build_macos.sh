@@ -14,8 +14,9 @@ case "$(uname -m)" in
     x86_64) LABEL=intel ;;
     *) echo "Unknown processor: $(uname -m)"; exit 1 ;;
 esac
-export PANEL_VERSION="${PANEL_VERSION:-1.0.0}"
 PYTHON="${PYTHON:-python3}"
+# the version number lives in ft991a_panel.py (set PANEL_VERSION to override it)
+export PANEL_VERSION="${PANEL_VERSION:-$("$PYTHON" packaging/version.py)}"
 APP_NAME="FT-991A Panel"
 
 echo "== $LABEL build, version $PANEL_VERSION, $($PYTHON --version)"

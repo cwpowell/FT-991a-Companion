@@ -14,7 +14,16 @@ import os
 import sys
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
-VERSION = os.environ.get("PANEL_VERSION", "1.0.0")
+ICONS = os.path.join(ROOT, "packaging", "icons")
+def _panel_version():
+    """The version in ft991a_panel.py, unless the build script says otherwise."""
+    import re
+    with open(os.path.join(ROOT, "ft991a_panel.py"), encoding="utf-8") as f:
+        m = re.search(r'^__version__ = "([^"]+)"', f.read(), re.M)
+    return m.group(1) if m else "0.0.0"
+
+
+VERSION = os.environ.get("PANEL_VERSION") or _panel_version()
 
 binaries = []
 if sys.platform == "win32":
@@ -46,7 +55,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="FT-991A Panel.app",
-        icon=None,
+        icon=os.path.join(ICONS, "ft991a.icns"),
         bundle_identifier="io.github.cwpowell.ft991a-remote",
         info_plist={
             "CFBundleName": "FT-991A Panel",
@@ -66,4 +75,5 @@ else:
         name="FT-991A-Panel",
         console=False,
         upx=False,
+        icon=os.path.join(ICONS, "ft991a.ico"),      # used on Windows; ignored elsewhere
     )

@@ -33,6 +33,9 @@ class Sim:
         self.narrow = 0          # NA: 0 wide, 1 narrow
         self.data_mode = 1       # menu 062: 0 PSK, 1 OTHER
         self.fa_sets = 0         # how many FA set commands arrived (to check coalescing)
+        self.alc_level = 40      # ALC reading while transmitting: audio is reaching the radio (0 = none)
+        self.menu_raw = {}       # menu number -> raw value text; a test fills in the items it needs
+        self.menu_reject = set()  # menu numbers whose writes the radio ignores (for tests)
         self.agc = 3             # GT: 0 off, 1 fast, 2 mid, 3 slow, 4 auto (answers may be 4-6)
         self.af = 100            # AG: 0-255 receive volume
         self.menu = {m: 50 for m in ("046", "054", "073", "075", "078", "099", "107")}  # transmit levels
@@ -68,7 +71,7 @@ class Sim:
         if which == "6":   # SWR
             return int(30 + random.uniform(-3, 3)) if transmitting else 0
         if which == "4":   # ALC
-            return int(random.uniform(0, 6)) if transmitting else 0
+            return int(self.alc_level + random.uniform(0, 6)) if transmitting else 0
         if which == "1":   # S meter
             return int(100 + random.uniform(-10, 10)) if not transmitting else 0
         if which == "8":   # VDD
@@ -102,6 +105,12 @@ class Sim:
                 return f"AG0{self.af:03d};"
             if c.startswith("AG0") and len(c) == 6:
                 self.af = int(c[3:])
+                return None
+            if c.startswith("EX") and len(c) >= 5 and c[2:5] in self.menu_raw:   # any menu item
+                if len(c) == 5:
+                    return f"EX{c[2:5]}{self.menu_raw[c[2:5]]};"
+                if c[2:5] not in self.menu_reject:       # a test can make the radio refuse an item
+                    self.menu_raw[c[2:5]] = c[5:]
                 return None
             if c.startswith("EX") and len(c) == 5 and c[2:] in self.menu:
                 return f"EX{c[2:]}{self.menu[c[2:]]:03d};"

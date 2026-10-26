@@ -3,7 +3,7 @@
 ; It expects dist\FT-991A-Panel.exe to have been built already.
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.0.2"
 #endif
 
 [Setup]
@@ -26,6 +26,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayIcon={app}\FT-991A-Panel.exe
+SetupIconFile=..\packaging\icons\ft991a.ico
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked

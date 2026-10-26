@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/img/icon.png" width="128" alt="FT-991A Panel icon"></p>
+
 # FT-991A remote station
 
 Tools for operating a Yaesu FT-991A from another computer over a network such as
@@ -7,9 +9,9 @@ Tools for operating a Yaesu FT-991A from another computer over a network such as
 - **`freedv_audio_bridge.py`** is a UDP audio bridge that carries the radio's USB audio and your
   transmit audio, for voice and for [FreeDV](https://freedv.org).
 
-| Radio tab | Audio tab |
-| --- | --- |
-| ![Radio tab](docs/img/panel-radio.png) | ![Audio tab](docs/img/panel-audio.png) |
+| Radio tab | Audio tab | Settings tab |
+| --- | --- | --- |
+| ![Radio tab](docs/img/panel-radio.png) | ![Audio tab](docs/img/panel-audio.png) | ![Settings tab](docs/img/panel-settings.png) |
 
 The screenshots were taken against the simulated radio in this repository.
 
@@ -20,13 +22,23 @@ The screenshots were taken against the simulated radio in this repository.
 - VFO A and VFO B side by side. Tune digit by digit with the mouse wheel, or type a frequency.
   Split on and off, and a VFO swap.
 - Mode, an FM / C4FM toggle for VHF and UHF, a bandwidth slider, AGC (off, fast, mid, slow, auto),
-  power, the internal antenna tuner (in line, and a tune button).
+  power, the internal antenna tuner (in line, and a tune button). A light beside the ATU button is
+  green when the tuner is off, yellow when it is in line, and flashes while it tunes.
 - Push-to-talk: click once to transmit and click again to stop, or press the space bar. It has a
   time-out and lets go when the connection drops or the panel closes.
 - Switch the radio on and off remotely.
-- S meter, power, SWR and ALC meters, with calibration.
+- S meter, power, SWR and ALC meters, with calibration. The ALC meter is on the radio's own scale
+  (green to 25%, orange to 50%, red above). Meters for the audio from the radio and for your
+  microphone sit beside them.
 - Mic level and Volume sliders. These are software levels on your computer, and the radio's own
   volume and menu settings are never changed.
+
+**Settings tab**
+
+- All 153 items of the radio's menu, in 18 sections, read from the radio and changeable: check
+  boxes, pull-downs, sliders and entry fields as each item needs. Every change is read back, nothing
+  is written while transmitting, and a few risky items (CAT RATE, REF FREQ ADJ ...) ask first.
+  It needs the raw CAT connection.
 
 **Audio tab**
 
@@ -36,7 +48,10 @@ The screenshots were taken against the simulated radio in this repository.
 - Virtual cables (BlackHole on macOS, VB-Cable on Windows) let FreeDV share the audio, or choose
   "direct" to connect the network straight to your speakers and microphone.
 - PCM or Opus, with the bridge's own options under Advanced, plus level meters and statistics
-  that show where the audio stops if you hear nothing.
+  that show where the audio stops if you hear nothing. The status line includes the radio's ALC, and
+  says so when your audio is sent but is not reaching the radio.
+- A **Copy report** button puts the settings, status and log on the clipboard (IP addresses hidden)
+  to paste into a bug report.
 
 The panel talks to the radio through a raw CAT connection (for example
 [ser2net](https://github.com/cminyard/ser2net)) or through Hamlib's `rigctld`. Some features, such
@@ -53,7 +68,9 @@ python3 freedv_audio_bridge.py server --bind YOUR-TAILSCALE-ADDRESS \
     --in-dev "<radio capture device>" --out-dev "<radio playback device>" --wait
 ```
 
-`freedv-audio-bridge.service` runs the same thing in the background as a systemd user service.
+`freedv-audio-bridge.service` runs the same thing in the background as a systemd user service. Add
+`--pin-volumes 100` to keep the PulseAudio / PipeWire volumes of the radio's sound card, and of the
+bridge's own streams, from being turned down (every correction is logged).
 
 On the operating computer:
 
@@ -106,7 +123,7 @@ You can also build on your own computer: `bash packaging/build_macos.sh` or
 | `fake_ft991a.py` | any | A simulated FT-991A for the raw CAT connection. |
 | `fake_rigctld.py` | any | A simulated `rigctld`. |
 | `Contributions/` | | `opus.dll`, a 64-bit build of the Opus codec library (libopus 1.6.1) for Windows, with its readme. The Windows program and installer use it. |
-| `packaging/` | | The recipe and build scripts for the macOS and Windows installers. |
+| `packaging/` | | The recipe, build scripts and icons (`packaging/icons/`) for the macOS and Windows installers. The version number lives in `ft991a_panel.py`. |
 | `.github/workflows/build.yml` | GitHub | Builds the installers. |
 | `MacOS/`, `Windows/` | | The finished installers, once built. |
 
@@ -121,6 +138,8 @@ The server and the panel speak the same audio protocol, so either can be updated
   network such as Tailscale, and never expose them to the internet.
 
 ## Status
+
+Version 1.0.2 (see `CHANGELOG.md`).
 
 Developed against the simulators in this repository. The maintainer has run it against a real
 FT-991A over ser2net from macOS: the control panel, remote power on and off, push-to-talk, and

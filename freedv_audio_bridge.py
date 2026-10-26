@@ -72,8 +72,9 @@ if HAVE_OPUS:
     except Exception:
         pass
 
-__version__ = ("2026-10-25a --wait also recovers when the audio devices disappear; listen-only "
-               "(rx_only) option; waits for missing audio devices; strict-clock pacing, Opus options")
+__version__ = ("2026-10-26a --pin-volumes keeps PulseAudio volumes up; --wait also recovers when the "
+               "audio devices disappear; listen-only (rx_only) option; waits for missing audio "
+               "devices; strict-clock pacing, Opus options")
 
 # Let waiting threads (notably the packet-sending clock) get the interpreter lock quickly.
 # The default 5 ms can delay a send tick enough to cause back-to-back packets, which some
@@ -134,6 +135,104 @@ def parse_dev(s):
     if isinstance(s, int):
         return s
     return int(s) if s.isdigit() else s
+
+
+class PulsePinner(threading.Thread):
+    """Keep the PulseAudio / PipeWire volumes of the radio's sound card, and of this program's own
+    streams, at a set percentage and unmuted.
+
+    Something keeps turning them down: a desktop mixer, FreeDV, the volume that PulseAudio
+    remembers for each program, or the sound card appearing again at another level when the radio
+    is switched on. Each correction is logged, which also shows when it happens. It manages
+    only PulseAudio devices (PipeWire included, through its PulseAudio server); it needs the
+    pactl command and does nothing, with a note, when that is missing."""
+
+    def __init__(self, node, percent, interval=10.0, log=print):
+        super().__init__(daemon=True, name="pulse-pinner")
+        self.percent, self.interval, self.log = int(percent), max(1.0, float(interval)), log
+        self.sink = self._pulse_name(node.out_dev)      # the radio's playback device (transmit audio)
+        self.source = self._pulse_name(node.in_dev)     # the radio's capture device (receive audio)
+        self.stop_event = threading.Event()
+        self.broken = False
+
+    @staticmethod
+    def _pulse_name(dev):
+        if dev is None:
+            return None
+        try:
+            info = sd.query_devices(dev)
+            if "pulse" in sd.query_hostapis(info["hostapi"])["name"].lower():
+                return info["name"]
+        except Exception:
+            pass
+        return None
+
+    def _pactl(self, *args):
+        import subprocess
+        try:
+            out = subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5)
+        except FileNotFoundError:
+            if not self.broken:
+                self.broken = True
+                self.log("pin-volumes: the pactl command was not found, so the volumes are not managed")
+            return None
+        except Exception as exc:
+            self.log(f"pin-volumes: pactl {' '.join(args[:2])} failed: {exc}")
+            return None
+        return out.stdout if out.returncode == 0 else None
+
+    @staticmethod
+    def _percents(text):
+        import re
+        return [int(v) for v in re.findall(r"/\s*(\d+)%\s*/", text or "")]
+
+    def _fix(self, what, kind, ident, volume_text, mute_text):
+        pcts = self._percents(volume_text)
+        if pcts and min(pcts) != self.percent:
+            self._pactl(f"set-{kind}-volume", ident, f"{self.percent}%")
+            self.log(f"pin-volumes: {what} volume was {min(pcts)}%, set to {self.percent}%")
+        if mute_text and "yes" in mute_text.lower():
+            self._pactl(f"set-{kind}-mute", ident, "0")
+            self.log(f"pin-volumes: {what} was muted, unmuted")
+
+    def _device(self, kind, name, what):
+        self._fix(what, kind, name, self._pactl(f"get-{kind}-volume", name),
+                  self._pactl(f"get-{kind}-mute", name))
+
+    def _streams(self, kind, header, what):
+        """This program's own playback or capture streams, found by process id."""
+        import re
+        text = self._pactl("list", f"{kind}s")
+        if not text:
+            return
+        for block in re.split(rf"(?m)^{header} #", text)[1:]:
+            ident = block.split("\n", 1)[0].strip()
+            m = re.search(r'application\.process\.id = "(\d+)"', block)
+            if not m or int(m.group(1)) != os.getpid():
+                continue
+            vol = re.search(r"(?m)^\s*Volume:.*$", block)
+            mute = re.search(r"(?m)^\s*Mute:.*$", block)
+            self._fix(what, kind, ident, vol.group(0) if vol else "", mute.group(0) if mute else "")
+
+    def apply(self):
+        if self.sink:
+            self._device("sink", self.sink, "the radio's playback")
+        if self.source:
+            self._device("source", self.source, "the radio's capture")
+        self._streams("sink-input", "Sink Input", "this program's playback stream")
+        self._streams("source-output", "Source Output", "this program's capture stream")
+
+    def run(self):
+        if not (self.sink or self.source):
+            self.log("pin-volumes: the radio's devices are not PulseAudio devices, so there is "
+                     "nothing to manage")
+            return
+        while not self.stop_event.is_set() and not self.broken:
+            self.apply()
+            self.stop_event.wait(self.interval)
+
+    def stop(self):
+        self.stop_event.set()
 
 
 def _peak(buf):
@@ -760,6 +859,13 @@ def main():
     ap.add_argument("--wait", action="store_true",
                     help="keep retrying every few seconds until the audio devices exist "
                          "(use this to start the bridge before switching the radio on)")
+    ap.add_argument("--pin-volumes", type=int, default=0, metavar="PERCENT",
+                    help="PulseAudio / PipeWire: keep the volume of the radio's sound card, and of "
+                         "this program's own streams, at PERCENT (for example 100) and unmuted, "
+                         "checking every --pin-interval seconds and logging each correction. "
+                         "0 = leave the volumes alone (default)")
+    ap.add_argument("--pin-interval", type=float, default=10.0, metavar="SECONDS",
+                    help="how often --pin-volumes checks (default 10)")
     ap.add_argument("--no-pace", action="store_true",
                     help="disable packet pacing (not recommended: bursts of packets "
                          "can be dropped by the network path)")
@@ -807,9 +913,16 @@ def main():
                 pass
             continue
         tries = 0
+        pinner = None
+        if a.pin_volumes:
+            pinner = PulsePinner(node, a.pin_volumes, a.pin_interval, log=lambda m: print(m, flush=True))
+            pinner.start()
         # with --wait, a bridge that is left running also recovers when its devices go away
         # (the radio is switched off) and come back (it is switched on again)
-        if node.monitor(watchdog=a.wait) == "quit":
+        result = node.monitor(watchdog=a.wait)
+        if pinner is not None:
+            pinner.stop()
+        if result == "quit":
             return
         node.stop()
         try:

@@ -34,11 +34,14 @@ Environment=PYTHONUNBUFFERED=1
 # --wait    start before the radio is on, and recover by itself when the radio is switched off
 #           and on again (the bridge notices that its audio stopped and starts again)
 # --out-gain-db -9    the audio level sent to the radio, which sets the transmit drive
+# --pin-volumes 100   keep the PulseAudio / PipeWire volume of the radio's sound card, and of the
+#           bridge's own streams, at 100% and unmuted. Each correction is logged (see the journal),
+#           which also shows when something turns the volume down. Remove it to leave them alone.
 ExecStart=/usr/bin/python3 %h/freedv_audio_bridge.py server \
     --bind YOUR-TAILSCALE-ADDRESS --port 5800 \
     --in-dev alsa_input.usb-Burr-Brown --out-dev alsa_output.usb-Burr-Brown \
     --rate 48000 --frame-ms 10 --jitter-ms 110 --out-gain-db -9 \
-    --codec pcm --wait
+    --codec pcm --wait --pin-volumes 100
 
 # If the Tailscale address does not exist yet at boot, the bridge cannot bind, exits, and is
 # started again every 5 seconds until it can.
