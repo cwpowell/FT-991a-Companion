@@ -23,6 +23,26 @@ import threading
 import time
 
 
+# The radio's functions, restated here straight from Yaesu's CAT manual and kept apart from the
+# panel's own table, so that a mistake in either shows up as a refused command:
+# (command, selector, width of the value, lowest, highest, value at start).
+FN_SPEC = [
+    ("PA", "0", 1, 0, 2, 0), ("RA", "0", 1, 0, 1, 0), ("RG", "0", 3, 0, 255, 255),
+    ("SQ", "0", 3, 0, 100, 0), ("NB", "0", 1, 0, 1, 0), ("NL", "0", 3, 0, 10, 5),
+    ("NR", "0", 1, 0, 1, 0), ("RL", "0", 2, 1, 15, 8), ("BC", "0", 1, 0, 1, 0),
+    ("BP", "00", 3, 0, 1, 0), ("BP", "01", 3, 1, 320, 100),
+    ("CO", "00", 4, 0, 1, 0), ("CO", "01", 4, 10, 3200, 500), ("CO", "02", 4, 0, 1, 0),
+    ("PR", "0", 1, 1, 2, 1), ("PR", "1", 1, 1, 2, 1), ("PL", "", 3, 0, 100, 50),
+    ("MG", "", 3, 0, 100, 50), ("ML", "0", 3, 0, 1, 0), ("ML", "1", 3, 0, 100, 50),
+    ("VX", "", 1, 0, 1, 0), ("VG", "", 3, 0, 100, 50), ("VD", "", 4, 30, 3000, 300),
+    ("KR", "", 1, 0, 1, 0), ("BI", "", 1, 0, 1, 0), ("KS", "", 3, 4, 60, 20),
+    ("KP", "", 2, 0, 75, 30), ("SD", "", 4, 30, 3000, 300),
+    ("OS", "0", 1, 0, 2, 0), ("CT", "0", 1, 0, 4, 0), ("CN", "00", 3, 0, 49, 12),
+    ("LK", "", 1, 0, 1, 0), ("FS", "", 1, 0, 1, 0),
+]
+FM_MODES = ("4", "A", "B")       # FM, DATA-FM, FM-N (the CAT mode codes)
+
+
 class Sim:
     def __init__(self):
         self.lock = threading.Lock()
@@ -37,6 +57,10 @@ class Sim:
         self.menu_raw = {}       # menu number -> raw value text; a test fills in the items it needs
         self.menu_reject = set()  # menu numbers whose writes the radio ignores (for tests)
         self.s_for = None         # optional: a function frequency -> S meter reading (for tests)
+        self.fn = {c + sel: dflt for c, sel, _w, _lo, _hi, dflt in FN_SPEC}   # the functions
+        self.fn_reject = set()   # functions whose writes the radio ignores (for tests), by command+selector
+        self.fn_log = []         # every accepted write: (command+selector, the digits sent)
+        self.cmd_count = 0       # how many commands arrived (to check how busy the line is)
         self.agc = 3             # GT: 0 off, 1 fast, 2 mid, 3 slow, 4 auto (answers may be 4-6)
         self.af = 100            # AG: 0-255 receive volume
         self.menu = {m: 50 for m in ("046", "054", "073", "075", "078", "099", "107")}  # transmit levels
@@ -81,10 +105,42 @@ class Sim:
             return 150
         return 0
 
+    def fn_available(self, cmd, sel):
+        """Which functions the radio answers in its present mode (a guess, to test greying out)."""
+        fm = self.mode in FM_MODES
+        if cmd in ("OS", "CT", "CN"):
+            return fm                                   # repeater shift and tones: FM only
+        if (cmd, sel) == ("CO", "02"):
+            return self.mode in ("3", "7")              # the audio peak filter: CW only
+        if cmd in ("BP", "CO"):
+            return not fm                               # notch and contour: not in FM
+        return True
+
+    def fn_respond(self, c):
+        """A function command (NB, NR, PA ...), laid out as Yaesu's CAT manual says. Returns the
+        reply, None for a write that was accepted, or False when c is not a function command."""
+        for cmd, sel, width, lo, hi, _dflt in FN_SPEC:
+            key = cmd + sel
+            if not c.startswith(key):
+                continue
+            rest = c[len(key):]
+            if not self.fn_available(cmd, sel):
+                return "?;"
+            if rest == "":
+                return f"{key}{self.fn[key]:0{width}d};"
+            if len(rest) != width or not rest.isdigit() or not lo <= int(rest) <= hi:
+                return "?;"                              # wrong length or out of range: refused
+            if key not in self.fn_reject:
+                self.fn[key] = int(rest)
+            self.fn_log.append((key, rest))
+            return None
+        return False
+
     def respond(self, cmd):
         """cmd without the trailing ';'. Returns the reply (with ';') or None."""
         c = cmd.upper()
         with self.lock:
+            self.cmd_count += 1
             if c in ("PS0", "PS1"):
                 dt = None if self.dummy_at is None else time.time() - self.dummy_at
                 ok = dt is not None and 1.0 <= dt <= 2.0
@@ -198,6 +254,9 @@ class Sim:
                         self.tuning_until = time.time() + 3.0
                         self.tx = 2
                 return None
+            reply = self.fn_respond(c)
+            if reply is not False:
+                return reply
             return "?;"
 
 
