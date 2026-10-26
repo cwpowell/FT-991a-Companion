@@ -43,10 +43,15 @@ jobs:
       - name: Version number
         shell: bash
         run: |
+          S="$(python3 packaging/version.py)"
           V="${{ github.event.inputs.version }}"
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
-          if [ -z "$V" ]; then V="$(python3 packaging/version.py)"; fi
-          echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
+          V="${V#v}"
+          if [ -n "$V" ] && [ "$V" != "$S" ]; then
+            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
+            exit 1
+          fi
+          echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
       - name: Build the app and the disk image
         run: bash packaging/build_macos.sh
       - name: Self-test report
@@ -69,10 +74,15 @@ jobs:
       - name: Version number
         shell: bash
         run: |
+          S="$(python3 packaging/version.py)"
           V="${{ github.event.inputs.version }}"
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
-          if [ -z "$V" ]; then V="$(python3 packaging/version.py)"; fi
-          echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
+          V="${V#v}"
+          if [ -n "$V" ] && [ "$V" != "$S" ]; then
+            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
+            exit 1
+          fi
+          echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --yes --no-progress
@@ -86,9 +96,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows
-          path: |
-            dist/FT-991A-Panel.exe
-            dist/FT-991A-Panel-Setup.exe
+          path: dist/FT-991A-Panel-*.exe      # the program and the installer, both with the version in the name
           if-no-files-found: error
 
   publish:
@@ -103,18 +111,25 @@ jobs:
           merge-multiple: true
       - name: Version number
         run: |
+          S="$(python3 packaging/version.py)"
           V="${{ github.event.inputs.version }}"
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
-          if [ -z "$V" ]; then V="$(python3 packaging/version.py)"; fi
-          echo "PANEL_VERSION=${V#v}" >> "$GITHUB_ENV"
+          V="${V#v}"
+          if [ -n "$V" ] && [ "$V" != "$S" ]; then
+            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
+            exit 1
+          fi
+          echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
       - name: Put the files in the MacOS and Windows folders
         if: github.event_name == 'workflow_dispatch' && inputs.commit_files
         run: |
           set -e
           ls -l artifacts
           mkdir -p MacOS Windows
+          git rm -q --ignore-unmatch -- 'MacOS/*.dmg' 'Windows/*.exe'     # only this version stays
+          rm -f MacOS/*.dmg Windows/*.exe
           cp artifacts/*.dmg MacOS/
-          cp artifacts/FT-991A-Panel.exe artifacts/FT-991A-Panel-Setup.exe Windows/
+          cp artifacts/*.exe Windows/
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add MacOS Windows

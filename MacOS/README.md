@@ -1,13 +1,18 @@
 # macOS installers
 
 The disk images are built by GitHub rather than by hand, because a Mac app can only be built on a
-Mac. Go to **Actions**, choose **Build installers**, then **Run workflow**. When it finishes, the
-files below are committed to this folder.
+Mac. Download them from the **Releases** page of this repository. The version is in the file name,
+and the app's title bar shows it too.
 
 | File | For |
 | --- | --- |
-| `ft-991a-apple-silicon.dmg` | Macs with an Apple chip (M1 and later) |
-| `ft-991a-intel.dmg` | Macs with an Intel chip |
+| `ft-991a-apple-silicon-<version>.dmg` | Macs with an Apple chip (M1 and later) |
+| `ft-991a-intel-<version>.dmg` | Macs with an Intel chip |
+
+To make a new build, go to **Actions**, choose **Build installers**, then **Run workflow**, and leave
+the Version box empty: the version is the one in `ft991a_panel.py`. The finished files are attached to
+a *draft* release; publish it to make them public. A build stops with an error if the app it made is not
+the version in `ft991a_panel.py`.
 
 To see which you have, choose Apple menu, then **About This Mac**: it says either "Chip: Apple M..."
 or "Processor: Intel...".

@@ -1,13 +1,17 @@
 # Windows program and installer
 
-These files are built by GitHub, because a Windows program can only be built on Windows. Go to
-**Actions**, choose **Build installers**, then **Run workflow**. When it finishes, the files below
-are committed to this folder.
+These files are built by GitHub, because a Windows program can only be built on Windows. Download
+them from the **Releases** page of this repository. The version is in the file names.
+
+To make a new build, go to **Actions**, choose **Build installers**, then **Run workflow**, and leave
+the Version box empty: the version is the one in `ft991a_panel.py`. The finished files are attached to
+a *draft* release; publish it to make them public. A build stops with an error if the program it made
+is not the version in `ft991a_panel.py`.
 
 | File | What it is |
 | --- | --- |
-| `FT-991A-Panel-Setup.exe` | The installer. It adds a Start menu entry and an uninstaller, with an optional desktop shortcut, and needs no administrator rights unless you choose to install for all users. |
-| `FT-991A-Panel.exe` | The program on its own. Copy it anywhere and run it; nothing is installed. |
+| `FT-991A-Panel-Setup-<version>.exe` | The installer. It adds a Start menu entry and an uninstaller, with an optional desktop shortcut, and needs no administrator rights unless you choose to install for all users. |
+| `FT-991A-Panel-<version>.exe` | The program on its own. Copy it anywhere and run it; nothing is installed. |
 
 Both contain Python, Tk, the sound library and the Opus library (`opus.dll`, from the
 `Contributions` folder), so there is nothing else to install.

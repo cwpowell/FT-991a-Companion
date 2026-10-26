@@ -1,7 +1,7 @@
 @echo off
 rem Build FT-991A-Panel.exe and its installer, FT-991A-Panel-Setup.exe, on Windows.
-rem   dist\FT-991A-Panel.exe          the program, one file, opus.dll built in
-rem   dist\FT-991A-Panel-Setup.exe    the installer (needs Inno Setup 6: https://jrsoftware.org/isinfo.php)
+rem   dist\FT-991A-Panel-<version>.exe        the program, one file, opus.dll built in
+rem   dist\FT-991A-Panel-Setup-<version>.exe  the installer (needs Inno Setup 6: https://jrsoftware.org/isinfo.php)
 rem
 rem You need Python 3.12 from python.org (it includes Tk). Run this from any folder.
 setlocal
@@ -44,13 +44,25 @@ findstr /B /C:"FAIL" build\selftest.txt >nul && (
     exit /b 1
 )
 
+rem 3b. the program must be the version this build says it is. The self-test line reads
+rem     "OK   panel version: 1.0.3", and its fourth word is the version.
+set BUILT=
+for /f "tokens=4" %%v in ('findstr /C:"panel version:" build\selftest.txt') do set BUILT=%%v
+if not "%BUILT%"=="%PANEL_VERSION%" (
+    echo !! VERSION MISMATCH: this build is meant to be %PANEL_VERSION%, but the program says "%BUILT%".
+    exit /b 1
+)
+echo == version %PANEL_VERSION% confirmed
+del dist\FT-991A-Panel-*.exe >nul 2>&1
+copy /Y dist\FT-991A-Panel.exe dist\FT-991A-Panel-%PANEL_VERSION%.exe >nul || exit /b 1
+
 rem 4. the installer
 set ISCC=
 if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe
 if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe
 if "%ISCC%"=="" (
-    echo Inno Setup 6 was not found, so only the program was built: dist\FT-991A-Panel.exe
+    echo Inno Setup 6 was not found, so only the program was built: dist\FT-991A-Panel-%PANEL_VERSION%.exe
     exit /b 0
 )
 "%ISCC%" /Qp /DAppVersion=%PANEL_VERSION% packaging\ft991a-panel.iss || exit /b 1
-echo == built dist\FT-991A-Panel.exe and dist\FT-991A-Panel-Setup.exe
+echo == built dist\FT-991A-Panel-%PANEL_VERSION%.exe and dist\FT-991A-Panel-Setup-%PANEL_VERSION%.exe

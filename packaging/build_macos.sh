@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build "FT-991A Panel.app" and a .dmg for the Mac you are running this on.
-#   Apple Silicon Mac  ->  dist/ft-991a-apple-silicon.dmg
-#   Intel Mac          ->  dist/ft-991a-intel.dmg
+#   Apple Silicon Mac  ->  dist/ft-991a-apple-silicon-<version>.dmg
+#   Intel Mac          ->  dist/ft-991a-intel-<version>.dmg
 # A build only runs on the kind of Mac it was made on, so GitHub builds both (see
 # .github/workflows/build.yml). You can also run this by hand on your own Mac.
 #
@@ -67,13 +67,23 @@ if ! "$APP/Contents/MacOS/$APP_NAME" --selftest "$SELFTEST"; then
     echo "!! THE SELF-TEST FAILED: something is missing from the app (see above)."; exit 1
 fi
 
+# 5b. the app must be the version this build says it is. What the program reports and the version
+#     in its Info.plist must both equal PANEL_VERSION, which is what the files are named after.
+BUILT="$("$APP/Contents/MacOS/$APP_NAME" --version | awk '{print $NF}')"
+PLIST="$(python -c 'import plistlib, sys; print(plistlib.load(open(sys.argv[1], "rb")).get("CFBundleShortVersionString", ""))' "$APP/Contents/Info.plist")"
+if [ "$BUILT" != "$PANEL_VERSION" ] || [ "$PLIST" != "$PANEL_VERSION" ]; then
+    echo "!! VERSION MISMATCH: this build is meant to be $PANEL_VERSION, but the program says '$BUILT' and Info.plist says '$PLIST'."
+    exit 1
+fi
+echo "== version $PANEL_VERSION confirmed (the program and Info.plist agree)"
+
 # 6. the disk image: the app, and a shortcut to Applications to drag it onto
 STAGE="build/dmg-$LABEL"
 rm -rf "$STAGE" && mkdir -p "$STAGE" "dist"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
-DMG="dist/ft-991a-$LABEL.dmg"
-rm -f "$DMG"
+DMG="dist/ft-991a-$LABEL-$PANEL_VERSION.dmg"
+rm -f dist/ft-991a-"$LABEL"*.dmg
 for attempt in 1 2 3; do
     if hdiutil create -volname "FT-991A Panel" -srcfolder "$STAGE" -ov -format UDZO "$DMG"; then
         break

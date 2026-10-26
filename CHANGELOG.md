@@ -15,6 +15,8 @@
   reduction controls are greyed out. The Mac and Windows installers include it, which makes them
   larger.
 - The self-test (`--selftest`) now also runs the noise reduction.
+- The installers carry the version in their file names. A build now fails if the program it made is
+  not the version in `ft991a_panel.py`, and a version typed into the workflow must match it.
 
 ## 1.0.2
 
