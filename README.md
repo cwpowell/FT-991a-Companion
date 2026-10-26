@@ -50,6 +50,10 @@ The screenshots were taken against the simulated radio in this repository.
 - PCM or Opus, with the bridge's own options under Advanced, plus level meters and statistics
   that show where the audio stops if you hear nothing. The status line includes the radio's ALC, and
   says so when your audio is sent but is not reaching the radio.
+- **Noise reduction**: a check box, a level from 1 to 20 and an 
+  **Auto-calibrate** button. It is spectral subtraction on the audio that goes to your speakers (the cable 
+  that FreeDV reads is never touched). Auto-calibrate retunes to a quiet frequency beside yours, learns the 
+  noise there, and retunes back; PTT and Tune are refused while it is away. Needs numpy.
 - A **Copy report** button puts the settings, status and log on the clipboard (IP addresses hidden)
   to paste into a bug report.
 
@@ -87,7 +91,8 @@ python3 fake_ft991a.py --port 4533 --demo
 python3 ft991a_panel.py --host 127.0.0.1 --port 4533 --backend cat
 ```
 
-The panel needs only Python 3 and tkinter. The Audio tab also needs `sounddevice`. On Windows,
+The panel needs only Python 3 and tkinter. The Audio tab also needs `sounddevice`
+and the noise reduction needs numpy (without it that one feature is greyed out). On Windows,
 put a 64-bit `opus.dll` next to `ft991a_panel.py` to use Opus. The panel remembers its settings in
 `~/.ft991a_panel.json`.
 
