@@ -24,7 +24,8 @@ Shows:
   - a Hide log button, and noise reduction (spectral subtraction) on the audio you listen to
   - a Function tab with the radio's front-panel functions (preamp, attenuator, RF gain, squelch,
     contour, noise blanker, the radio's noise reduction, notches, speech processor, mic gain, monitor,
-    VOX, CW keyer, repeater shift and tone, dial lock) and a Menu tab with all 153 of its menu items
+    VOX, CW keyer, repeater shift and tone, dial lock), a CW send page (the radio's five keyer
+    memories: edit them and play them) and a Menu tab with all 153 of its menu items
     (both need the Raw CAT connection)
   - Mic level and Volume sliders, the same controls as on the Audio tab
   - an Audio tab with FreeDV-style routing: radio to computer, computer to speaker, mic to
@@ -51,7 +52,7 @@ opuslib for Opus).   python3 ft991a_panel.py [--host H --port P]
 Meter values come from Hamlib's own calibration tables. If your wattmeter disagrees, use
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
-__version__ = "1.0.6"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.0.7"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -1163,6 +1164,21 @@ class Radio:
     def fn_snapshot(self):
         return {}, {}
 
+    def read_keyer_memory(self, slot):          # nor to the keyer memories (the CW send page)
+        pass
+
+    def write_keyer_memory(self, slot, text):
+        pass
+
+    def play_keyer(self, code):
+        pass
+
+    def zero_in(self):
+        pass
+
+    def km_snapshot(self):
+        return {}, {}
+
     def send(self, cmd, lines=1, timeout=REPLY_TIMEOUT):
         """Queue a command typed by the user (set commands reply with one RPRT line)."""
         self.userq.put((cmd, lines, timeout))
@@ -1403,6 +1419,7 @@ class CatRadio:
         self.state = self._blank()
         self.menu_vals, self.menu_t = {}, {}    # menu number -> raw value, and when it arrived
         self.fn_vals, self.fn_t = {}, {}        # function (command + selector) -> value, and when
+        self.km_vals, self.km_t = {}, {}        # keyer memory 1..5 -> its text, and when it arrived
 
     @staticmethod
     def _blank():
@@ -1444,6 +1461,26 @@ class CatRadio:
     def fn_snapshot(self):
         with self.lock:
             return dict(self.fn_vals), dict(self.fn_t)
+
+    # CW keying. The FT-991A has no "send this text" command: it plays back what is stored in its
+    # five keyer memories (KY 1 to 5), or its recorded message keys (KY 6 to A). Text is put there
+    # with KM, up to 50 characters.
+    def read_keyer_memory(self, slot):
+        self.send(f"KM{slot};")
+
+    def write_keyer_memory(self, slot, text):
+        self.send(f"KM{slot}{text};")
+        self.send(f"KM{slot};")                   # read it back, to see what the radio kept
+
+    def play_keyer(self, code):
+        self.send(f"KY{code};")
+
+    def zero_in(self):
+        self.send("ZI;")                          # CW auto zero-in
+
+    def km_snapshot(self):
+        with self.lock:
+            return dict(self.km_vals), dict(self.km_t)
 
     # actions used by the panel (Radio has the same ones)
     def set_mode(self, ham):
@@ -1638,6 +1675,9 @@ class CatRadio:
                         st["data_mode"] = msg[5]               # menu 062 DATA MODE: 0 PSK, 1 OTHER
                 elif c == "GT" and len(msg) == 4 and msg[3].isdigit():
                     st["agc"] = int(msg[3])
+                elif c == "KM" and len(msg) >= 3 and msg[2] in "12345":    # a keyer memory (CW send)
+                    self.km_vals[msg[2]] = msg[3:].rstrip()
+                    self.km_t[msg[2]] = time.monotonic()
                 elif c in FN_CMDS:                                   # a function (Function tab)
                     key = next((p for p in FN_BY_CMD[c] if msg.startswith(p)), None)
                     if (key is None or len(msg) != len(key) + FN_WIDTH[key]
@@ -1931,7 +1971,8 @@ def menu_text(item, value):
 # Not here, on purpose: AGC, narrow, bandwidth, the tuner and the power (they are on the Radio tab),
 # the meters (ALC, power, SWR), and the radio's own volume (the panel never changes it).
 
-FN_PAGES = ("Receive", "Noise", "Transmit", "CW", "FM and more")
+FN_PAGES = ("Receive", "Noise", "Transmit", "CW", "CW send", "FM and more")
+CW_PAGE = 4          # the page that sends CW (it has its own controls, not entries of FUNCTIONS)
 
 CTCSS_HZ = (67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5,
             107.2, 110.9, 114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7,
@@ -1997,16 +2038,17 @@ FUNCTIONS = [
     _fn("ptc", 3, "Sidetone pitch", "KP", "", 2, "slider", lo=0, hi=75, step=1,
         fmt=lambda v: f"{300 + 10 * v} Hz"),
     _fn("bkd", 3, "Break-in delay", "SD", "", 4, "slider", lo=30, hi=3000, step=10, fmt=_ms),
+    _fn("csp", 3, "CW spot (tuning tone)", "CS", "", 1, "toggle", opts=("0", "1")),
     # --- FM and more
-    _fn("shf", 4, "Repeater shift", "OS", "0", 1, "choice",
+    _fn("shf", 5, "Repeater shift", "OS", "0", 1, "choice",
         opts={"0": "Simplex", "1": "Plus (+)", "2": "Minus (-)"}),
-    _fn("ctm", 4, "Tone mode", "CT", "0", 1, "choice",
+    _fn("ctm", 5, "Tone mode", "CT", "0", 1, "choice",
         opts={"0": "Off", "1": "Tone enc/dec", "2": "Tone encode",
               "3": "DCS enc/dec", "4": "DCS encode"}),
-    _fn("ctn", 4, "CTCSS tone", "CN", "00", 3, "choice",
+    _fn("ctn", 5, "CTCSS tone", "CN", "00", 3, "choice",
         opts={f"{i:03d}": f"{hz:.1f} Hz" for i, hz in enumerate(CTCSS_HZ)}),
-    _fn("lck", 4, "Dial lock (VFO A)", "LK", "", 1, "toggle", opts=("0", "1")),
-    _fn("fst", 4, "Fast step (VFO A)", "FS", "", 1, "toggle", opts=("0", "1")),
+    _fn("lck", 5, "Dial lock (VFO A)", "LK", "", 1, "toggle", opts=("0", "1")),
+    _fn("fst", 5, "Fast step (VFO A)", "FS", "", 1, "toggle", opts=("0", "1")),
 ]
 FN = {f["id"]: f for f in FUNCTIONS}
 FN_WIDTH = {f["prefix"]: f["width"] for f in FUNCTIONS}
@@ -2364,6 +2406,202 @@ class SettingsTab(ttk.Frame):
         self.commit(num, menu_encode(item, value, self.width_for(num)))
 
 
+CW_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /?.,=-")
+CW_SLOTS = "12345"
+CW_MAX = 50
+
+
+def cw_clean(text):
+    """What the radio's keyer is given: capitals, digits, space and . , ? / = -, in at most 50
+    characters, with runs of spaces made into one."""
+    kept = "".join(c for c in text.upper() if c in CW_OK)
+    return " ".join(kept.split())[:CW_MAX]
+
+
+class CwSend:
+    """The CW send page of the Function tab.
+
+    The FT-991A cannot be told to send arbitrary text. It plays back what is stored in its five keyer
+    memories (CAT command KY 1 to 5) or its recorded message keys (KY 6 to A), and text is put into a
+    memory with KM, up to 50 characters. So this page edits the five memories and plays them.
+
+    Play only ever plays what is already stored in the radio: it never stores and plays in one go, so
+    nothing can be sent later by surprise. It refuses unless the radio is connected over raw CAT, is in
+    a CW mode and is not transmitting, and never during a noise calibration, when the radio is on
+    another frequency. The radio does the keying; the panel does not time any of it."""
+    READ_EVERY = 3.0
+
+    def __init__(self, page, tab):
+        self.tab, self.panel = tab, tab.panel
+        self.vars, self.labels, self.entries, self.buttons = {}, {}, {}, []
+        self.shown = {}          # slot -> the text last drawn from the radio (or stored)
+        self.pending = {}        # slot -> (text written, time) until the radio's answer arrives
+        self.asked = {}          # slot -> when it was last read
+        box = ttk.Frame(page)
+        box.grid(row=0, column=0, sticky="w")
+        vcmd = (page.register(lambda proposed: len(proposed) <= CW_MAX), "%P")
+        for r, n in enumerate(CW_SLOTS):
+            self.labels[n] = ttk.Label(box, text=f"Memory {n}", width=9)
+            self.labels[n].grid(row=r, column=0, sticky="w", pady=2)
+            self.vars[n] = tk.StringVar()
+            self.entries[n] = ttk.Entry(box, textvariable=self.vars[n], width=24, validate="key",
+                                        validatecommand=vcmd)
+            self.entries[n].grid(row=r, column=1, padx=(0, 4))
+            for col, (text, cmd) in enumerate((("Store", self.on_store), ("Play", self.on_play))):
+                b = ttk.Button(box, text=text, style="Compact.TButton",
+                               command=lambda c=cmd, k=n: c(k))
+                b.grid(row=r, column=2 + col, padx=1)
+                self.buttons.append(b)
+        row = len(CW_SLOTS)
+        ttk.Label(box, text="Recorded messages").grid(row=row, column=0, columnspan=2, sticky="w",
+                                                      pady=(8, 0))
+        mf = ttk.Frame(box)
+        mf.grid(row=row, column=1, columnspan=3, sticky="e", pady=(8, 0))
+        for i in range(5):
+            b = ttk.Button(mf, text=f"{i + 1}", width=2, style="Compact.TButton",
+                           command=lambda k=i: self.on_play_message(k))
+            b.grid(row=0, column=i, padx=1)
+            self.buttons.append(b)
+        sf = ttk.Frame(box)
+        sf.grid(row=row + 1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.stop_btn = ttk.Button(sf, text="Stop (TX off)", style="Compact.TButton",
+                                   command=self.on_stop)
+        self.stop_btn.grid(row=0, column=0, padx=(0, 6))
+        self.zero_btn = ttk.Button(sf, text="Zero in", style="Compact.TButton",
+                                   command=self.on_zero_in)
+        self.zero_btn.grid(row=0, column=1)
+        self.buttons += [self.stop_btn, self.zero_btn]
+        ttk.Label(box, foreground="#666666", wraplength=380, justify="left", text=(
+            "Allowed: letters, digits, space and the signs . , ? / = - (up to 50 characters). Play "
+            "sends what is stored in the radio, so press Store after you edit a memory (a * marks text "
+            "that is not stored). It needs a CW mode. The speed and pitch are on the CW page.")
+        ).grid(row=row + 2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.set_enabled(False)
+
+    # ---- state -----------------------------------------------------------------------------------
+    def set_enabled(self, on):
+        for b in self.buttons:
+            b.state(["!disabled"] if on else ["disabled"])
+        for e in self.entries.values():
+            e.state(["!disabled"] if on else ["disabled"])
+
+    def on_show(self):
+        self.asked.clear()
+
+    def stored(self, n):
+        vals, times = self.panel.radio.km_snapshot()
+        raw = vals.get(n)
+        if raw is None or time.monotonic() - times.get(n, 0.0) > 10.0:
+            return None
+        return raw
+
+    def refresh(self, now, talking):
+        """Called often while the page is showing."""
+        p, radio = self.panel, self.panel.radio
+        self.set_enabled(talking)
+        if not talking:
+            self.asked.clear()
+            self.pending.clear()
+            return
+        due = [n for n in CW_SLOTS if now - self.asked.get(n, -1e9) >= self.READ_EVERY
+               and n not in self.pending]
+        if due:                                       # one at a time: the line is shared
+            radio.read_keyer_memory(due[0])
+            self.asked[due[0]] = now
+        vals, times = radio.km_snapshot()
+        for n, (text, when) in list(self.pending.items()):
+            if now - when > 6.0:                      # too late to mean anything
+                del self.pending[n]
+                p.append_log(f"CW memory {n}: no answer from the radio")
+            elif times.get(n, 0.0) > when:
+                del self.pending[n]
+                got = vals.get(n, "")
+                self.shown[n] = got
+                if got == text:
+                    p.append_log(f"CW memory {n} stored: {text} ({len(text)} characters)")
+                else:
+                    p.append_log(f"CW memory {n}: the radio did not accept that text; it holds "
+                                 f"'{got}'")
+        for n in CW_SLOTS:
+            raw = vals.get(n)
+            fresh = raw is not None and now - times.get(n, 0.0) < 10.0
+            cur = self.vars[n].get()
+            edited = cur != self.shown.get(n, "")
+            if fresh and not edited and n not in self.pending and raw != self.shown.get(n):
+                self.shown[n] = raw                   # the radio's text, or a change made on the radio
+                self.vars[n].set(raw)
+                cur = raw
+            self.labels[n].configure(text=f"Memory {n}" + (" *" if cur != self.shown.get(n, "") else ""))
+
+    # ---- keying -----------------------------------------------------------------------------------
+    def reason_not_to_key(self):
+        p = self.panel
+        radio, s = p.radio, p.radio.snapshot()
+        if radio.units != "raw" or not radio.connected:
+            return "the Raw CAT connection to the radio is needed"
+        if p.nr_cal.active:
+            return "a noise calibration is running, and the radio is on another frequency"
+        if s.get("ptt") or p.ptt_down or s.get("tuning") or p.tune_deadline:
+            return "the radio is transmitting or tuning"
+        if s.get("mode") not in ("CW", "CWR"):
+            return "the radio is not in a CW mode (CW-U or CW-L)"
+        return None
+
+    def refuse(self, what, why):
+        self.panel.append_log(f"CW: {what} not done: {why}")
+        messagebox.showinfo("CW send", f"Not done: {why}.")
+
+    def on_store(self, n):
+        p = self.panel
+        if not self.tab.can_talk():
+            return self.refuse(f"Storing memory {n}", "the Raw CAT connection to the radio is needed")
+        text = cw_clean(self.vars[n].get())
+        if not text:
+            messagebox.showinfo("CW send", "Type some text first. (A memory cannot be emptied from "
+                                           "here.)")
+            return
+        if n in self.pending:
+            return
+        self.vars[n].set(text)                        # show exactly what the radio is given
+        p.radio.write_keyer_memory(n, text)
+        self.pending[n] = (text, time.monotonic())
+        self.shown[n] = text
+
+    def on_play(self, n):
+        why = self.reason_not_to_key()
+        if why:
+            return self.refuse(f"Memory {n}", why)
+        stored = self.stored(n)
+        if n in self.pending or stored is None or cw_clean(self.vars[n].get()) != stored:
+            return self.refuse(f"Memory {n}", "its text is not stored in the radio yet; press Store first, "
+                                              "because the radio plays what it has stored")
+        if not stored:
+            return self.refuse(f"Memory {n}", "it is empty")
+        self.panel.radio.play_keyer(n)
+        self.panel.append_log(f"CW: sending memory {n}: {stored}")
+
+    def on_play_message(self, i):
+        why = self.reason_not_to_key()
+        if why:
+            return self.refuse(f"Recorded message {i + 1}", why)
+        self.panel.radio.play_keyer("6789A"[i])
+        self.panel.append_log(f"CW: playing recorded message {i + 1}")
+
+    def on_stop(self):
+        if not self.tab.can_talk():
+            return
+        self.panel.radio.set_ptt(False)               # TX0; the same command the PTT button ends with
+        self.panel.append_log("CW: Stop sent (transmit off). If the radio goes on sending, use its own "
+                              "controls.")
+
+    def on_zero_in(self):
+        why = self.reason_not_to_key()
+        if why:
+            return self.refuse("Zero in", why)
+        self.panel.radio.zero_in()
+        self.panel.append_log("CW: zero in (the radio tunes itself to the signal it hears)")
+
+
 class FunctionTab(ttk.Frame):
     """The radio's front-panel functions: preamp, attenuator, RF gain, squelch, contour, the noise
     blanker and the radio's own noise reduction, notches, the speech processor, mic gain, monitor,
@@ -2402,6 +2640,7 @@ class FunctionTab(ttk.Frame):
         for item in FUNCTIONS:
             self.add_row(self.pages[item["page"]], used[item["page"]], item)
             used[item["page"]] += 1
+        self.cw = CwSend(self.pages[CW_PAGE], self)
         ttk.Label(self.pages[2], foreground="#666666", wraplength=380, justify="left", text=(
             "The VOX delay is the MIC or the DATA one, as menu 142 VOX SELECT says."
         )).grid(row=used[2], column=0, columnspan=3, sticky="w", pady=(4, 0))
@@ -2489,10 +2728,18 @@ class FunctionTab(ttk.Frame):
             index = 0
         return [f for f in FUNCTIONS if f["page"] == index]
 
+    def cw_showing(self):
+        try:
+            return self.pnb.index("current") == CW_PAGE
+        except tk.TclError:
+            return False
+
     def on_page(self):
         for f in self.page_items():
             self.asked.pop(f["prefix"], None)         # read this page now
             self.since.pop(f["prefix"], None)
+        if self.cw_showing():
+            self.cw.on_show()
         self.last_refresh = 0.0
 
     def can_talk(self):
@@ -2518,6 +2765,10 @@ class FunctionTab(ttk.Frame):
                             "which cannot reach these functions.")
         elif not radio.connected:
             self.set_status("Not connected to the radio.")
+        elif self.cw_showing():
+            self.set_status("Play makes the radio transmit: try it on a dummy load first. Stop sends "
+                            "'transmit off', which the radio may not honour for a message that is "
+                            "already playing.")
         else:
             self.set_status("A change is written to the radio at once and read back. A function "
                             "is greyed out when the radio does not answer it in its present mode.")
@@ -2525,6 +2776,7 @@ class FunctionTab(ttk.Frame):
         if not talking:
             for f in FUNCTIONS:                       # every page, not only the one that is showing
                 self.unavailable(f, "")
+            self.cw.refresh(now, False)
             return
         due = [f for f in items if now - self.asked.get(f["prefix"], -1e9) >= self.READ_EVERY]
         due = [f for f in due if f["id"] not in self.busy][:3]    # a few at a time: the line is shared
@@ -2565,6 +2817,8 @@ class FunctionTab(ttk.Frame):
             self.shown[ident] = raw
             self.set_widget(f, raw)
             self.enable(row, True)
+        if self.cw_showing():
+            self.cw.refresh(now, True)
 
     # ---- writing -------------------------------------------------------------------------------------
     def restore(self, ident):

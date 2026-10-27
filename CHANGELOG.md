@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.7
+
+- **CW send**, a new page on the Function tab (after CW), for the radio's CW memories. The FT-991A
+  cannot be told to send arbitrary text: over CAT it plays back what is stored in its five keyer
+  memories (KY 1 to 5) or its recorded message keys (KY 6 to A), and text goes into a memory with KM,
+  up to 50 characters. The page edits and plays them:
+  - five memory rows, each with the text the radio holds, **Store** and **Play**. Store cleans the
+    text (capitals; only letters, digits, space and . , ? / = - ; at most 50 characters), writes it,
+    reads it back, and the log says whether the radio kept it. A * marks text that is not stored yet,
+    and a change made on the radio itself appears here.
+  - Play only plays what is stored. It never stores and plays in one go, so nothing can be sent later
+    by surprise.
+  - buttons for the five recorded messages, **Stop (TX off)** (the same TX0 command as the PTT
+    button; the manual does not say whether it ends a message that is already playing) and **Zero
+    in** (the radio's CW auto zero-in).
+  - Play, the recorded messages and Zero in are refused, with a message, unless the radio is connected
+    over raw CAT, is in CW-U or CW-L and is not transmitting, and they are always refused during a
+    noise calibration. While the page shows, the status line reminds you to try it on a dummy load.
+- A **CW spot** toggle (a tone for tuning to a signal) on the CW page. The Function tab now has six
+  pages, with FM and more as the sixth.
+- Written from Yaesu's CAT manual and tested against the simulator, which now understands KM, KY, ZI
+  and CS. Not yet tried on a real radio.
+
 ## 1.0.6
 
 - **Auto-calibrate now finds a clear frequency where it used to fail.** A real log showed it rejecting

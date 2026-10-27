@@ -38,8 +38,10 @@ FN_SPEC = [
     ("KR", "", 1, 0, 1, 0), ("BI", "", 1, 0, 1, 0), ("KS", "", 3, 4, 60, 20),
     ("KP", "", 2, 0, 75, 30), ("SD", "", 4, 30, 3000, 300),
     ("OS", "0", 1, 0, 2, 0), ("CT", "0", 1, 0, 4, 0), ("CN", "00", 3, 0, 49, 12),
-    ("LK", "", 1, 0, 1, 0), ("FS", "", 1, 0, 1, 0),
+    ("LK", "", 1, 0, 1, 0), ("FS", "", 1, 0, 1, 0), ("CS", "", 1, 0, 1, 0),
 ]
+KM_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /?.,=-")   # what the keyer memory takes (assumed)
+CW_MODES = ("3", "7")                                        # CW and CW-R (the CAT mode codes)
 FM_MODES = ("4", "A", "B")       # FM, DATA-FM, FM-N (the CAT mode codes)
 
 
@@ -60,6 +62,12 @@ class Sim:
         self.fn = {c + sel: dflt for c, sel, _w, _lo, _hi, dflt in FN_SPEC}   # the functions
         self.fn_reject = set()   # functions whose writes the radio ignores (for tests), by command+selector
         self.fn_log = []         # every accepted write: (command+selector, the digits sent)
+        self.km = {n: t for n, t in zip("12345", ("CQ CQ DE NK8O NK8O K", "5NN TU", "", "", ""))}
+        self.km_reject = set()   # keyer memories whose writes the radio ignores (for tests)
+        self.ky_log = []         # every accepted KY: the code (1-5 memories, 6-A recorded messages)
+        self.zi_count = 0        # how many times ZI (zero in) was accepted
+        self.cw_until = 0.0      # a played CW message keeps the radio transmitting until then
+        self.cw_seconds = 0.8    # how long a played message "transmits" in the simulation
         self.cmd_count = 0       # how many commands arrived (to check how busy the line is)
         self.agc = 3             # GT: 0 off, 1 fast, 2 mid, 3 slow, 4 auto (answers may be 4-6)
         self.af = 100            # AG: 0-255 receive volume
@@ -220,9 +228,31 @@ class Sim:
                 self.mode = c[3]
                 return None
             if c == "TX":
-                return f"TX{self.tx};"
+                return f"TX{2 if time.time() < self.cw_until else self.tx};"
             if c in ("TX0", "TX1"):
                 self.tx = int(c[2])
+                if c == "TX0":
+                    self.cw_until = 0.0                   # transmit off also ends a played message
+                return None
+            if c.startswith("KM") and len(c) >= 3 and c[2] in "12345":    # keyer memory
+                n, text = c[2], c[3:]
+                if text == "":
+                    return f"KM{n}{self.km[n]};"
+                if len(text) > 50 or any(ch not in KM_OK for ch in text):
+                    return "?;"                           # more than 50 characters, or a character it cannot send
+                if n not in self.km_reject:
+                    self.km[n] = text
+                return None
+            if c.startswith("KY") and len(c) == 3 and c[2] in "123456789A":   # play a memory or message
+                if self.mode not in CW_MODES:
+                    return "?;"
+                self.ky_log.append(c[2])
+                self.cw_until = time.time() + self.cw_seconds
+                return None
+            if c == "ZI":                                 # CW auto zero-in
+                if self.mode not in CW_MODES:
+                    return "?;"
+                self.zi_count += 1
                 return None
             if c == "PC":
                 return f"PC{self.power:03d};"
