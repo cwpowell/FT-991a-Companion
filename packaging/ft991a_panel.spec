@@ -1,4 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
+# FT-991A Companion
+# Copyright (C) 2026  Charles W. Powell, NK8O
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 # PyInstaller recipe for the FT-991A panel, for both macOS and Windows.
 # Do not run it directly; use the build script for your system:
 #     macOS:    bash packaging/build_macos.sh
@@ -35,7 +53,8 @@ a = Analysis(
     [os.path.join(ROOT, "ft991a_panel.py")],
     pathex=[ROOT],
     binaries=binaries,
-    datas=[],
+    # the licence files travel inside every packaged program (see license_dir() in the panel)
+    datas=[(os.path.join(ROOT, name), "licenses") for name in ("LICENSE", "NOTICE.md", "THIRD-PARTY-LICENSES.txt")],
     hiddenimports=[],
     # numpy is needed (noise reduction); these are not, and leaving them out keeps the app smaller
     excludes=["matplotlib", "scipy", "pandas", "PIL"],

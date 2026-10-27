@@ -147,5 +147,5 @@ jobs:
           TAG="v$PANEL_VERSION"
           gh release create "$TAG" artifacts/* --draft \
             --title "FT-991A Panel $PANEL_VERSION" \
-            --notes "Installers for macOS (Apple Silicon and Intel) and Windows." \
+            --notes "Installers for macOS (Apple Silicon and Intel) and Windows. FT-991A Companion is free software under the GNU General Public License, version 3 or later. The licence is inside each installer, and the source of this version is this repository at this release's tag." \
             || gh release upload "$TAG" artifacts/* --clobber

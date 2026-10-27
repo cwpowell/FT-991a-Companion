@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+# FT-991A Companion
+# Copyright (C) 2026  Charles W. Powell, NK8O
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """
 fake_ft991a.py - a simulated Yaesu FT-991A for testing ft991a_panel.py's "Raw CAT" connection
 without a radio.
@@ -40,7 +58,7 @@ FN_SPEC = [
     ("OS", "0", 1, 0, 2, 0), ("CT", "0", 1, 0, 4, 0), ("CN", "00", 3, 0, 49, 12),
     ("LK", "", 1, 0, 1, 0), ("FS", "", 1, 0, 1, 0), ("CS", "", 1, 0, 1, 0),
 ]
-KM_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /?.,=-")   # what the keyer memory takes (assumed)
+KM_OK = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 /?.,=-")   # what a CW memory takes (assumed)
 CW_MODES = ("3", "7")                                        # CW and CW-R (the CAT mode codes)
 FM_MODES = ("4", "A", "B")       # FM, DATA-FM, FM-N (the CAT mode codes)
 
@@ -62,9 +80,16 @@ class Sim:
         self.fn = {c + sel: dflt for c, sel, _w, _lo, _hi, dflt in FN_SPEC}   # the functions
         self.fn_reject = set()   # functions whose writes the radio ignores (for tests), by command+selector
         self.fn_log = []         # every accepted write: (command+selector, the digits sent)
-        self.km = {n: t for n, t in zip("12345", ("CQ CQ DE NK8O NK8O K", "5NN TU", "", "", ""))}
-        self.km_reject = set()   # keyer memories whose writes the radio ignores (for tests)
-        self.ky_log = []         # every accepted KY: the code (1-5 memories, 6-A recorded messages)
+        # The CW memories, as a program known to work with these radios describes them: text goes in with
+        # KM and ends with "}"; the memory must be TEXT in menu 018 to 022; KY6 to KYA play text memory
+        # 1 to 5, and KY1 to KY5 play the memories recorded with the paddle.
+        self.km = {n: t for n, t in zip("12345", ("CQ CQ DE NK8O NK8O K}", "5NN TU}", "", "", ""))}
+        for n in range(18, 23):
+            self.menu_raw.setdefault(f"{n:03d}", "0")        # CW MEMORY 1 to 5: 0 TEXT, 1 MESSAGE
+        self.km_reject = set()   # CW memories whose writes the radio ignores (for tests)
+        self.km_noterm = set()   # memories written without the closing "}" (the panel must never do this)
+        self.ky_log = []         # every KY that made the radio send: the code
+        self.ky_silent = []      # KY codes that sent nothing, and why: (code, reason)
         self.zi_count = 0        # how many times ZI (zero in) was accepted
         self.cw_until = 0.0      # a played CW message keeps the radio transmitting until then
         self.cw_seconds = 0.8    # how long a played message "transmits" in the simulation
@@ -234,20 +259,33 @@ class Sim:
                 if c == "TX0":
                     self.cw_until = 0.0                   # transmit off also ends a played message
                 return None
-            if c.startswith("KM") and len(c) >= 3 and c[2] in "12345":    # keyer memory
+            if c.startswith("KM") and len(c) >= 3 and c[2] in "12345":    # a CW memory
                 n, text = c[2], c[3:]
                 if text == "":
                     return f"KM{n}{self.km[n]};"
-                if len(text) > 50 or any(ch not in KM_OK for ch in text):
-                    return "?;"                           # more than 50 characters, or a character it cannot send
+                body = text[:-1] if text.endswith("}") else text
+                if len(text) > 50 or any(ch not in KM_OK for ch in body):
+                    return "?;"                           # more than 50 characters, or one it cannot send
                 if n not in self.km_reject:
                     self.km[n] = text
+                    (self.km_noterm.discard if text.endswith("}") else self.km_noterm.add)(n)
                 return None
-            if c.startswith("KY") and len(c) == 3 and c[2] in "123456789A":   # play a memory or message
+            if c.startswith("KY") and len(c) == 3 and c[2] in "123456789A":   # play a CW memory
                 if self.mode not in CW_MODES:
                     return "?;"
-                self.ky_log.append(c[2])
-                self.cw_until = time.time() + self.cw_seconds
+                code = c[2]
+                if code in "12345":                       # recorded with the paddle: always plays something
+                    self.ky_log.append(code)
+                    self.cw_until = time.time() + self.cw_seconds
+                    return None
+                n = str("6789A".index(code) + 1)          # text memory n
+                if self.menu_raw.get(f"{17 + int(n):03d}") != "0":
+                    self.ky_silent.append((code, "the memory is set to MESSAGE, not TEXT"))
+                elif not self.km[n].endswith("}") or self.km[n] == "}":
+                    self.ky_silent.append((code, "nothing stored, or no closing brace"))
+                else:
+                    self.ky_log.append(code)
+                    self.cw_until = time.time() + self.cw_seconds
                 return None
             if c == "ZI":                                 # CW auto zero-in
                 if self.mode not in CW_MODES:

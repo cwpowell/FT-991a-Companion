@@ -47,11 +47,13 @@ The screenshots were taken against the simulated radio in this repository.
 
 **Function tab**
 
-- The radio's front-panel functions in five small pages: **Receive** (preamp, attenuator, RF gain,
+- The radio's front-panel functions in seven small pages: **Receive** (preamp, attenuator, RF gain,
   squelch, contour, audio peak filter), **Noise** (noise blanker, the radio's own DNR noise
   reduction, auto and manual notch), **Transmit** (speech processor, mic equalizer, mic gain,
-  monitor, VOX), **CW** (keyer, break-in, speed, pitch, delay) and **FM and more** (repeater shift,
-  CTCSS tone, dial lock, fast step).
+  monitor, VOX), **CW** (keyer, break-in, speed, pitch, delay, CW spot), **Memory** (edit and play
+  the radio's five CW memories), **Keyboard** (type text or press a macro, and
+  [cwdaemon](https://github.com/acerion/cwdaemon) on the radio's computer keys the radio) and
+  **FM etc** (repeater shift, CTCSS tone, dial lock, fast step).
 - It reads the page that is showing, so a change made on the radio appears here. Every change is
   read back, a function the radio does not answer in its present mode is greyed out, VOX asks
   before it is turned on, and the mouse wheel never changes a setting. It needs the raw CAT
@@ -155,9 +157,11 @@ You can also build on your own computer: `bash packaging/build_macos.sh` or
 | `wavstat.py` | any | Summarises a bridge debug WAV file: level, continuity and tone frequency. |
 | `fake_ft991a.py` | any | A simulated FT-991A for the raw CAT connection. |
 | `fake_rigctld.py` | any | A simulated `rigctld`. |
+| `fake_cwdaemon.py` | any | A simulated `cwdaemon`, to try the Keyboard page without a radio. |
 | `Contributions/` | | `opus.dll`, a 64-bit build of the Opus codec library (libopus 1.6.1) for Windows, with its readme. The Windows program and installer use it. |
 | `packaging/` | | The recipe, build scripts and icons (`packaging/icons/`) for the macOS and Windows installers. The version number lives in `ft991a_panel.py`. |
 | `.github/workflows/build.yml` | GitHub | Builds the installers. |
+| `LICENSE`, `NOTICE.md`, `THIRD-PARTY-LICENSES.txt` | | The GNU General Public License, the credits, and the licences of the software that the installers include. |
 | `MacOS/`, `Windows/` | | A README for each installer. The installers themselves are on the Releases page. |
 
 The server and the panel speak the same audio protocol, so either can be updated on its own.
@@ -172,13 +176,14 @@ The server and the panel speak the same audio protocol, so either can be updated
 
 ## Status
 
-Version 1.0.6 (see `CHANGELOG.md`).
+Version 1.1.0 (see `CHANGELOG.md`).
 
 Developed against the simulators in this repository. The maintainer has run it against a real
 FT-991A over ser2net from macOS: the control panel, remote power on and off, push-to-talk, and
 audio in both directions with PCM and Opus,  and the local-radio audio mode. The Function tab, the 
 Band pull-down and the noise reduction have also been tested and seem to function within normal 
-operating parameters.  Not yet tested under Windows. Expect rough edges there, and please open 
+operating parameters. The CW Memory and Keyboard pages are new and have so far been tested only
+against the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
 an issue with the log and the status text from the Audio tab.
 
 ## Documentation
@@ -188,4 +193,14 @@ Each program describes its options in its header comments and with `--help`. A f
 
 ## License
 
-MIT. See `LICENSE`.
+FT-991A Companion is free software under the **GNU General Public License, version 3 or later**
+(GPL-3.0-or-later). See `LICENSE` for the text and `NOTICE.md` for the credits. The installers
+contain other software under its own licences, listed in `THIRD-PARTY-LICENSES.txt`. Every packaged
+program has these three files inside it: run it with `--license` (or `--save-license FOLDER` to copy
+them out).
+
+Versions before 1.1.0 were released under the MIT License, and a copy of one of those that you already
+have stays under it.
+
+The source of every version is in this repository. Each release is tagged with its version number,
+and the tag holds the source that was built into that release's installers.

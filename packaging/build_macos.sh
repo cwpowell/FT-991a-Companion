@@ -1,4 +1,22 @@
 #!/bin/bash
+# FT-991A Companion
+# Copyright (C) 2026  Charles W. Powell, NK8O
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 # Build "FT-991A Panel.app" and a .dmg for the Mac you are running this on.
 #   Apple Silicon Mac  ->  dist/ft-991a-apple-silicon-<version>.dmg
 #   Intel Mac          ->  dist/ft-991a-intel-<version>.dmg
@@ -81,6 +99,7 @@ echo "== version $PANEL_VERSION confirmed (the program and Info.plist agree)"
 STAGE="build/dmg-$LABEL"
 rm -rf "$STAGE" && mkdir -p "$STAGE" "dist"
 cp -R "$APP" "$STAGE/"
+cp LICENSE NOTICE.md THIRD-PARTY-LICENSES.txt "$STAGE/"      # the licence goes with the app
 ln -s /Applications "$STAGE/Applications"
 DMG="dist/ft-991a-$LABEL-$PANEL_VERSION.dmg"
 rm -f dist/ft-991a-"$LABEL"*.dmg

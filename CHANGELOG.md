@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.1.0
+
+- **The program is now under the GNU General Public License, version 3 or later** (GPL-3.0-or-later).
+  It was under the MIT License up to version 1.0.x, and a copy of one of those that you already have
+  stays under the MIT License. The change makes it possible to include code from other GPL programs,
+  with their authors' permission, such as K4-Companion by Dale Farnsworth, W7DA.
+  - `LICENSE` is the GNU GPL, version 3. `NOTICE.md` holds the credits and says where the source is.
+    `THIRD-PARTY-LICENSES.txt` holds the licences of the software that the installers include (Python,
+    Tcl/Tk, numpy, sounddevice, PortAudio, opuslib, Opus and PyInstaller), taken from their own packages.
+  - Every source file has a short GPL header with an SPDX identifier.
+  - The three files travel inside every download. The packaged program has them inside it, and
+    `--license` shows the notice (`--license full`, `credits` and `third-party` print the texts, and
+    `--save-license FOLDER` copies them out). The Windows installer shows the GPL on its licence page and
+    installs the files, the macOS disk image contains them, and the draft release says where the source
+    is. The self-test checks that a packaged program really contains them, and a build fails if not.
+
+## 1.0.9
+
+- **A Keyboard page** on the Function tab: type text, or press one of five macros (F1 to F5, which you
+  can edit, with [MYCALL] and [CALL] replaced by the two call signs you type), and **cwdaemon**
+  sends it. cwdaemon is a small free program that runs on the radio's computer and keys the radio
+  through the DTR line of its second USB serial port. The Morse timing is done there, so the network
+  cannot spoil it.
+  - Speed 5 to 60 wpm. **Abort** stops the message at once (the real cwdaemon drops the key the
+    moment the abort arrives).
+  - The panel tells you when a message has finished (cwdaemon sends a reply), and says so when it does
+    not confirm, which usually means that cwdaemon is not running or the address is wrong.
+  - Text that cwdaemon cannot key is removed. A + or - would change its speed in the middle of a
+    message, so they are left out. A long message goes in pieces of up to 120 characters.
+  - It refuses unless the panel is connected and the radio is in CW-U or CW-L, never during a noise
+    calibration, and not while the radio is transmitting for another reason. Abort is always allowed.
+  - The speed, your call, the macros and the address are remembered.
+- The Function tab's pages are now Receive, Noise, Transmit, CW, **Memory** (the radio's own CW
+  memories, which were called CW send), **Keyboard** and FM etc.
+- `fake_cwdaemon.py`: a simulated cwdaemon, to try the page without a radio.
+- Tested against the simulated cwdaemon and against the real cwdaemon 0.10.2 on its dummy device (the
+  text, the speed code, the abort and the end-of-message reply all behaved as documented). Not yet
+  tried on a radio. The cwdaemon in Ubuntu 24.04 is 0.10.2 and has no -o option for choosing the
+  keying lines; newer versions do.
+
+## 1.0.8
+
+- **Fix: Play on the CW send page did nothing on the radio.** Version 1.0.7 played the memories with
+  the codes in Yaesu's CAT table (KY 1 to 5), which play the memories *recorded with the paddle*. A
+  text memory 1 to 5 is played by **KY 6 to A**, as logging software that works with these radios
+  uses them. The page now sends those, and uses KY 1 to 5 for its "Recorded with the paddle" buttons.
+- Text written into a memory now ends with the **}** that the radio's contest memory keyer needs. A
+  message holds 49 characters of text, and the } is hidden on screen.
+- The page reads the radio's menu items 018 to 022 and says when a memory is set to MESSAGE (shown as
+  "(recorded)"). Store and Play then refuse and explain, because that memory cannot hold text.
+- The simulator now behaves this way (text played by KY6 to KYA, needs TEXT and the closing brace, and a
+  paddle-recorded memory played by KY1 to KY5), and the test checks that the panel never sends anything
+  that would play silently.
+- These facts come from a logging program's documentation for Yaesu radios, and are not yet confirmed
+  on an FT-991A.
+
 ## 1.0.7
 
 - **CW send**, a new page on the Function tab (after CW), for the radio's CW memories. The FT-991A
