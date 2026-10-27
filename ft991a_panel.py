@@ -70,7 +70,7 @@ opuslib for Opus).   python3 ft991a_panel.py [--host H --port P]
 Meter values come from Hamlib's own calibration tables. If your wattmeter disagrees, use
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
-__version__ = "1.1.0"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.1.1"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -5602,7 +5602,7 @@ class Panel:
                     geometry2=self.root.geometry(),
                     cal_po=self.cal_sets["hamlib"]["po"], cal_swr=self.cal_sets["hamlib"]["swr"],
                     cal_po_raw=self.cal_sets["cat"]["po"], cal_swr_raw=self.cal_sets["cat"]["swr"],
-                    confirm_tune=self.cfg.get("confirm_tune", True),
+                    tune_confirm=self.cfg.get("tune_confirm", False),
                     ptt_timeout=self.cfg.get("ptt_timeout", PTT_TIMEOUT),
                     ptt_release_on_focus_loss=self.cfg.get("ptt_release_on_focus_loss", False),
                     show_cal=self.show_cal,
@@ -5705,7 +5705,7 @@ class Panel:
             self.tune_deadline = 0.0
             self.append_log("Tuning stop requested")
             return
-        if self.cfg.get("confirm_tune", True):
+        if self.cfg.get("tune_confirm", False):        # off unless you turn it on in the settings file
             if not messagebox.askokcancel(
                     "Start tuning",
                     "The tuner transmits a carrier while it tunes.\n\nMake sure the antenna "

@@ -182,8 +182,8 @@ Developed against the simulators in this repository. The maintainer has run it a
 FT-991A over ser2net from macOS: the control panel, remote power on and off, push-to-talk, and
 audio in both directions with PCM and Opus,  and the local-radio audio mode. The Function tab, the 
 Band pull-down and the noise reduction have also been tested and seem to function within normal 
-operating parameters. The CW Memory and Keyboard pages are new and have so far been tested only
-against the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
+operating parameters. The CW Memory page has been tested on the radio and works well. The Keyboard page
+has so far been tested only against the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
 an issue with the log and the status text from the Audio tab.
 
 ## Documentation

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1
+
+- **Tune no longer asks for confirmation.** It starts at once, and pressing it again stops it. The
+  setting that controlled this was saved as `confirm_tune: true` in every existing settings file, so it
+  has a new name, `tune_confirm`, which is off unless you turn it on in `~/.ft991a_panel.json`. The
+  old `confirm_tune` is ignored.
+- Documentation: the CW Memory page has been confirmed on an FT-991A (Play keys the radio and works very
+  well), so the README and the manual say so. The Keyboard page is still tested only against
+  simulators and the real cwdaemon.
+
 ## 1.1.0
 
 - **The program is now under the GNU General Public License, version 3 or later** (GPL-3.0-or-later).
