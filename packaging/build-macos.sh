@@ -33,7 +33,7 @@ case "$(uname -m)" in
     *) echo "Unknown processor: $(uname -m)"; exit 1 ;;
 esac
 PYTHON="${PYTHON:-python3}"
-# the version number lives in ft991a_panel.py (set PANEL_VERSION to override it)
+# the version number lives in ft991a-panel.py (set PANEL_VERSION to override it)
 export PANEL_VERSION="${PANEL_VERSION:-$("$PYTHON" packaging/version.py)}"
 APP_NAME="FT-991A Panel"
 
@@ -66,7 +66,7 @@ python -m pip install --quiet pyinstaller sounddevice opuslib numpy
 
 # 3. the app
 rm -rf "dist/$LABEL" "build/work-$LABEL"
-pyinstaller --noconfirm --clean --distpath "dist/$LABEL" --workpath "build/work-$LABEL" packaging/ft991a_panel.spec
+pyinstaller --noconfirm --clean --distpath "dist/$LABEL" --workpath "build/work-$LABEL" packaging/ft991a-panel.spec
 APP="dist/$LABEL/$APP_NAME.app"
 [ -d "$APP" ] || { echo "The app was not built"; exit 1; }
 

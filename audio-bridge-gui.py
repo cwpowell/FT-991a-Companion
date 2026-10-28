@@ -18,11 +18,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-freedv_audio_bridge_gui.py - graphical front end for freedv_audio_bridge.py.
+audio-bridge-gui.py - graphical front end for audio-bridge.py.
 
 Run it on the radio computer in Server mode, and on the FreeDV computer in
-Client mode. Keep this file, freedv_audio_bridge.py and (on Windows) opus.dll
-in the same folder. Settings are remembered in ~/.freedv_audio_bridge.json.
+Client mode. Keep this file, audio-bridge.py and (on Windows) opus.dll
+in the same folder. Settings are remembered in ~/.audio-bridge.json.
 
 Requires:  pip install sounddevice opuslib
 """
@@ -39,9 +39,22 @@ from tkinter import messagebox, ttk
 
 import sounddevice as sd
 
-import freedv_audio_bridge as fb
+def _load_bridge():
+    """audio-bridge.py has a hyphen in its name, so it cannot be imported with a plain import
+    statement. Load it from the folder this file is in."""
+    import importlib.util
+    path = Path(__file__).resolve().parent / "audio-bridge.py"
+    spec = importlib.util.spec_from_file_location("audio_bridge", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["audio_bridge"] = module          # (so that dataclasses and pickling can find it)
+    spec.loader.exec_module(module)
+    return module
 
-CFG_FILE = Path.home() / ".freedv_audio_bridge.json"
+
+fb = _load_bridge()
+
+CFG_FILE = Path.home() / ".audio-bridge.json"
+OLD_CFG_FILE = Path.home() / ".freedv_audio_bridge.json"      # the name before the rename: read if the new one is not there yet
 RATES = [str(r) for r in fb.OPUS_RATES]
 FRAMES = [str(f) for f in fb.OPUS_FRAME_MS]
 BW_CHOICES = {"narrowband (4 kHz)": "nb", "wideband (8 kHz)": "wb",
@@ -64,10 +77,12 @@ def level_pct(peak):
 
 
 def load_cfg():
-    try:
-        return json.loads(CFG_FILE.read_text())
-    except Exception:
-        return {}
+    for path in (CFG_FILE, OLD_CFG_FILE):
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            continue
+    return {}
 
 
 class DeviceMissing(ValueError):
@@ -77,7 +92,7 @@ class DeviceMissing(ValueError):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("FreeDV Audio Bridge")
+        root.title("Audio Bridge")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.node = None
         self.logq = queue.SimpleQueue()

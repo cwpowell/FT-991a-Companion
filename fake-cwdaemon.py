@@ -29,7 +29,7 @@ port 6789 (or --port), keys nothing, and works out how long each message would t
     ESC 4               abort the message that is being sent
     ESC h <token>       when the text that follows has finished, reply "h<token>" + CR LF
 
-    python3 fake_cwdaemon.py --port 6789
+    python3 fake-cwdaemon.py --port 6789
 """
 import argparse
 import socket

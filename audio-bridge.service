@@ -16,38 +16,38 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# FreeDV audio bridge: the server side, running in the background on the radio's computer.
+# Audio bridge: the server side, running in the background on the radio's computer.
 #
 # Install (as the user who is logged in to the desktop and owns the radio's sound devices):
 #
 #   mkdir -p ~/.config/systemd/user
-#   cp freedv-audio-bridge.service ~/.config/systemd/user/
+#   cp audio-bridge.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now freedv-audio-bridge
+#   systemctl --user enable --now audio-bridge
 #   loginctl enable-linger "$USER"          # keep it running when you are not logged in
 #
-# Watch it:   journalctl --user -u freedv-audio-bridge -f
-# Stop it:    systemctl --user stop freedv-audio-bridge
+# Watch it:   journalctl --user -u audio-bridge -f
+# Stop it:    systemctl --user stop audio-bridge
 #
-# Before you start it, close the bridge window (freedv_audio_bridge_gui.py) and any other copy
+# Before you start it, close the bridge window (audio-bridge-gui.py) and any other copy
 # of the bridge: only one program can use UDP port 5800.
 #
 # Edit the three things marked CHANGE:
 
 [Unit]
-Description=FreeDV audio bridge (server)
+Description=Audio bridge (server)
 
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
 
 # CHANGE 1: the Python that runs the bridge by hand (a virtualenv's python if you use one),
-#           and where freedv_audio_bridge.py is (%h is your home folder).
+#           and where audio-bridge.py is (%h is your home folder).
 # CHANGE 2: replace YOUR-TAILSCALE-ADDRESS with this computer's Tailscale address (tailscale ip -4), so the bridge is reachable only over
 #           the tailnet (the bridge has no password of its own).
 # CHANGE 3: --in-dev and --out-dev are the radio's USB audio devices. A name substring is better
 #           than a number, because the numbers can change between boots. Check the names with:
-#               python3 freedv_audio_bridge.py list
+#               python3 audio-bridge.py list
 #
 # --wait    start before the radio is on, and recover by itself when the radio is switched off
 #           and on again (the bridge notices that its audio stopped and starts again)
@@ -55,7 +55,7 @@ Environment=PYTHONUNBUFFERED=1
 # --pin-volumes 100   keep the PulseAudio / PipeWire volume of the radio's sound card, and of the
 #           bridge's own streams, at 100% and unmuted. Each correction is logged (see the journal),
 #           which also shows when something turns the volume down. Remove it to leave them alone.
-ExecStart=/usr/bin/python3 %h/freedv_audio_bridge.py server \
+ExecStart=/usr/bin/python3 %h/audio-bridge.py server \
     --bind YOUR-TAILSCALE-ADDRESS --port 5800 \
     --in-dev alsa_input.usb-Burr-Brown --out-dev alsa_output.usb-Burr-Brown \
     --rate 48000 --frame-ms 10 --jitter-ms 110 --out-gain-db -9 \

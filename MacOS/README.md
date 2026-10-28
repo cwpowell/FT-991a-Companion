@@ -10,9 +10,9 @@ and the app's title bar shows it too.
 | `ft-991a-intel-<version>.dmg` | Macs with an Intel chip |
 
 To make a new build, go to **Actions**, choose **Build installers**, then **Run workflow**, and leave
-the Version box empty: the version is the one in `ft991a_panel.py`. The finished files are attached to
+the Version box empty: the version is the one in `ft991a-panel.py`. The finished files are attached to
 a *draft* release; publish it to make them public. A build stops with an error if the app it made is not
-the version in `ft991a_panel.py`.
+the version in `ft991a-panel.py`.
 
 To see which you have, choose Apple menu, then **About This Mac**: it says either "Chip: Apple M..."
 or "Processor: Intel...".
@@ -45,4 +45,4 @@ The first time you start the audio, macOS asks whether the app may use the micro
   not run them.
 - GitHub is retiring its Intel Mac build machines in fall 2027. After that only the Apple Silicon
   image can be rebuilt automatically.
-- Settings are kept in `~/.ft991a_panel.json`.
+- Settings are kept in `~/.ft991a-panel.json`.

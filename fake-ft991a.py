@@ -18,7 +18,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-fake_ft991a.py - a simulated Yaesu FT-991A for testing ft991a_panel.py's "Raw CAT" connection
+fake-ft991a.py - a simulated Yaesu FT-991A for testing ft991a-panel.py's "Raw CAT" connection
 without a radio.
 
 It listens on a TCP port and speaks the CAT subset the panel uses (ID, FA, IF, MD0, TX, PC,
@@ -27,8 +27,8 @@ arrives between 1 and 2 seconds after dummy data (a stray ";") with nothing else
 in standby the simulated radio answers nothing. Like ser2net with several clients connected, every reply is sent to ALL
 connected clients, so you can see how cross-talk behaves.
 
-  python3 fake_ft991a.py --port 4533            # then connect the panel (Raw CAT) to 127.0.0.1:4533
-  python3 fake_ft991a.py --port 4533 --demo     # also keys "TX" for 5 s out of every 15 s
+  python3 fake-ft991a.py --port 4533            # then connect the panel (Raw CAT) to 127.0.0.1:4533
+  python3 fake-ft991a.py --port 4533 --demo     # also keys "TX" for 5 s out of every 15 s
 
 Meter values are made up. Send "TX1;" / "TX0;" from any client (e.g. `nc 127.0.0.1 4533`) to
 key and unkey the simulated radio.

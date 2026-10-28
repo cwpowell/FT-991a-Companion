@@ -18,7 +18,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-ft991a_panel.py - remote status and control panel for a Yaesu FT-991A.
+ft991a-panel.py - remote status and control panel for a Yaesu FT-991A.
 
 Two connection types (choose in the window, or with --backend):
   hamlib  Hamlib's rigctld over TCP (default port 4532), using rigctld's plain-text protocol.
@@ -50,7 +50,7 @@ Shows:
     computer, computer to radio. Local radio: the radio's sound card is on this computer.
     Remote radio: the bridge on the server connects to the same radio-side endpoints (virtual
     cables such as BlackHole, or direct to the speakers and microphone). Volume and Mic level
-    sliders and a Mic on/off button. The audio engine is built in (the client side of freedv_audio_bridge.py,
+    sliders and a Mic on/off button. The audio engine is built in (the client side of audio-bridge.py,
     which keeps running on the server) and has the bridge's own options under Advanced. The
     radio's own volume is never touched.
   - an S meter while receiving; power output, SWR and ALC while transmitting, with a power
@@ -65,12 +65,13 @@ carrier, which asks for confirmation first. The calibration buttons are hidden u
 press the Calibration button.
 
 Python 3 and tkinter are needed; the Audio tab also needs the sounddevice package (and
-opuslib for Opus).   python3 ft991a_panel.py [--host H --port P]
+opuslib for Opus).   python3 ft991a-panel.py [--host H --port P]
 
 Meter values come from Hamlib's own calibration tables. If your wattmeter disagrees, use
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
-__version__ = "1.1.1"      # shown in the title bar; the installers and the report use it too
+APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
+__version__ = "1.1.2"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -87,7 +88,7 @@ from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
 # ======================================================================================
-# AUDIO ENGINE, built in. This is the client side of freedv_audio_bridge.py (the same engine
+# AUDIO ENGINE, built in. This is the client side of audio-bridge.py (the same engine
 # and wire protocol, so it talks to the bridge running on the server). Nothing here needs a
 # separate file: the Audio tab needs only the sounddevice package (and opuslib for Opus).
 # ======================================================================================
@@ -911,7 +912,8 @@ class Node:
 # end of the audio engine
 # ======================================================================================
 
-CFG_FILE = Path.home() / ".ft991a_panel.json"
+CFG_FILE = Path.home() / ".ft991a-panel.json"
+OLD_CFG_FILE = Path.home() / ".ft991a_panel.json"      # the name before 1.1.2: read if the new one is not there yet
 
 # (label shown, Hamlib mode name). DATA-USB is what FreeDV uses (Hamlib: PKTUSB).
 MODES = [("DATA-USB", "PKTUSB"), ("USB", "USB"), ("LSB", "LSB"), ("DATA-LSB", "PKTLSB"),
@@ -982,10 +984,12 @@ REPLY_TIMEOUT = 4.0               # seconds to wait for rigctld to answer a comm
 
 
 def load_cfg():
-    try:
-        return json.loads(CFG_FILE.read_text())
-    except Exception:
-        return {}
+    for path in (CFG_FILE, OLD_CFG_FILE):
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            continue
+    return {}
 
 
 def interp(points, x, origin):
@@ -3956,7 +3960,7 @@ class FreqDisplay(tk.Frame):
 class Panel:
     def __init__(self, root, args):
         self.root = root
-        root.title(f"FT-991A Remote Panel {__version__}")
+        root.title(f"{APP_NAME} {__version__}")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.cfg = load_cfg()
         self.logq = queue.SimpleQueue()
@@ -5154,7 +5158,7 @@ class Panel:
         snap = self.radio.snapshot()
         log_lines = self.log.get("1.0", "end").strip().splitlines()[-30:]
         lines = [
-            "FT-991A panel report",
+            f"{APP_NAME} report",
             f"panel version: {__version__}",
             f"engine: {ENGINE_VERSION}",
             f"python {sys.version.split()[0]} on {sys.platform}, "
@@ -5190,7 +5194,7 @@ class Panel:
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         self.root.update()
-        path = Path.home() / "ft991a_panel_report.txt"
+        path = Path.home() / "ft991a-panel-report.txt"
         try:
             path.write_text(text, encoding="utf-8")
             where = f" and saved as {path}"
@@ -5985,7 +5989,7 @@ def set_window_icon(root):
 
 
 LICENSE_FILES = ("LICENSE", "NOTICE.md", "THIRD-PARTY-LICENSES.txt")
-LICENSE_NOTICE = """FT-991A Companion {version}
+LICENSE_NOTICE = """{name} {version}
 Copyright (C) 2026  Charles W. Powell, NK8O
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU
@@ -6030,7 +6034,7 @@ def show_license(what="notice"):
             return 1
         print((d / LICENSE_PARTS[what]).read_text(encoding="utf-8"))
         return 0
-    print(LICENSE_NOTICE.format(version=__version__))
+    print(LICENSE_NOTICE.format(name=APP_NAME, version=__version__))
     print("More:  --license full         the GNU General Public License, version 3")
     print("       --license credits      credits, and where the source code is")
     print("       --license third-party  the licences of the software that is included")
@@ -6120,7 +6124,7 @@ def run_selftest(path):
 
 def main():
     ap = argparse.ArgumentParser(description="FT-991A remote panel")
-    ap.add_argument("--version", action="version", version=f"FT-991A panel {__version__}")
+    ap.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     ap.add_argument("--host", help="server host (connects immediately)")
     ap.add_argument("--port", type=int, help="TCP port: rigctld (default 4532) or the ser2net port")
     ap.add_argument("--backend", choices=("hamlib", "cat"),

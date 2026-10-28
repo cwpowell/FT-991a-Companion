@@ -24,7 +24,7 @@ rem
 rem You need Python 3.12 from python.org (it includes Tk). Run this from any folder.
 setlocal
 cd /d "%~dp0\.."
-rem the version number lives in ft991a_panel.py (set PANEL_VERSION to override it)
+rem the version number lives in ft991a-panel.py (set PANEL_VERSION to override it)
 if "%PANEL_VERSION%"=="" for /f %%v in ('python packaging\version.py') do set PANEL_VERSION=%%v
 echo == Windows build, version %PANEL_VERSION%
 
@@ -42,7 +42,7 @@ python -m pip install --quiet pyinstaller sounddevice opuslib numpy || exit /b 1
 
 rem 2. the program
 if exist dist\FT-991A-Panel.exe del dist\FT-991A-Panel.exe
-pyinstaller --noconfirm --clean --distpath dist --workpath build\work packaging\ft991a_panel.spec || exit /b 1
+pyinstaller --noconfirm --clean --distpath dist --workpath build\work packaging\ft991a-panel.spec || exit /b 1
 if not exist dist\FT-991A-Panel.exe (
     echo The program was not built.
     exit /b 1

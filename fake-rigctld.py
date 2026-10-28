@@ -18,11 +18,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-fake_rigctld.py - a stand-in for Hamlib's rigctld (plain-text protocol) for testing
-ft991a_panel.py without a radio.
+fake-rigctld.py - a stand-in for Hamlib's rigctld (plain-text protocol) for testing
+ft991a-panel.py without a radio.
 
-  python3 fake_rigctld.py --port 4532            # then run the panel against 127.0.0.1:4532
-  python3 fake_rigctld.py --port 4532 --demo     # also keys "PTT" for 5 s out of every 15 s
+  python3 fake-rigctld.py --port 4532            # then run the panel against 127.0.0.1:4532
+  python3 fake-rigctld.py --port 4532 --demo     # also keys "PTT" for 5 s out of every 15 s
 
 It answers the commands the panel uses (f m t T l L u U G) in rigctld's format. Meter values are
 made up. Several clients may connect at once; each gets only its own replies, like rigctld.

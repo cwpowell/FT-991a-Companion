@@ -17,11 +17,11 @@
 ; SPDX-License-Identifier: GPL-3.0-or-later
 
 ; Inno Setup 6 script for the FT-991A panel installer.
-; Build with packaging\build_windows.bat, or:  ISCC /DAppVersion=1.0.0 packaging\ft991a-panel.iss
+; Build with packaging\build-windows.bat, or:  ISCC /DAppVersion=1.0.0 packaging\ft991a-panel.iss
 ; It expects dist\FT-991A-Panel.exe to have been built already.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.1"
+  #define AppVersion "1.1.2"
 #endif
 
 [Setup]

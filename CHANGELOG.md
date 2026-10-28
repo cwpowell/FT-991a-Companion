@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.1.2
+
+- **The window title is now "FT-991a Companion 1.1.2"** (it was "FT-991A Remote Panel"). `--version`,
+  `--license` and the Copy report use the same name.
+- **The audio utility is now called `audio-bridge`.** It has grown beyond FreeDV, so the name no
+  longer says FreeDV: `audio-bridge.py`, `audio-bridge-gui.py` (its window is titled "Audio Bridge")
+  and `audio-bridge.service`.
+- **One naming style: hyphens.** File names with more than one word used a mix of hyphens and
+  underscores; they now all use hyphens:
+  `freedv_audio_bridge.py` to `audio-bridge.py`, `freedv_audio_bridge_gui.py` to
+  `audio-bridge-gui.py`, `freedv-audio-bridge.service` to `audio-bridge.service`,
+  `ft991a_panel.py` to `ft991a-panel.py`, `fake_ft991a.py`, `fake_rigctld.py` and `fake_cwdaemon.py` to
+  `fake-ft991a.py`, `fake-rigctld.py` and `fake-cwdaemon.py`, `radio_power.sh` to `radio-power.sh`,
+  `freedv_guard.sh` to `freedv-guard.sh`, and in `packaging/`: `ft991a_panel.spec`, `build_macos.sh`,
+  `build_windows.bat` and `icons/make_icon.py` to `ft991a-panel.spec`, `build-macos.sh`,
+  `build-windows.bat` and `icons/make-icon.py`.
+- The files the programs write follow the same rule: the panel's settings are now
+  `~/.ft991a-panel.json`, the bridge window's are `~/.audio-bridge.json`, and the Copy report file is
+  `~/ft991a-panel-report.txt`. **Your old settings are not lost:** when the new file does not exist
+  yet, the old one (`~/.ft991a_panel.json`, `~/.freedv_audio_bridge.json`) is read, and it is left where
+  it is.
+- Python cannot import a file whose name has a hyphen, so the bridge window now loads `audio-bridge.py`
+  by its path. Anything of your own that does `import ft991a_panel` or `import freedv_audio_bridge`
+  must load the file by path (`importlib.util.spec_from_file_location`) or be changed.
+- **If you run the bridge as a systemd service,** switch to the new unit:
+  `systemctl --user disable --now freedv-audio-bridge`, copy the new `audio-bridge.service` to
+  `~/.config/systemd/user/` (check its three CHANGE lines, which point at `audio-bridge.py`), then
+  `systemctl --user daemon-reload` and `systemctl --user enable --now audio-bridge`.
+
 ## 1.1.1
 
 - **Tune no longer asks for confirmation.** It starts at once, and pressing it again stops it. The

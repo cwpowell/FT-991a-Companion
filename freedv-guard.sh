@@ -17,12 +17,12 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# freedv_guard.sh - stop FreeDV's audio device settings from being overwritten.
+# freedv-guard.sh - stop FreeDV's audio device settings from being overwritten.
 #
-#   bash freedv_guard.sh save      remember the current audio settings as the good ones
-#   bash freedv_guard.sh check     show how the current audio settings differ from the saved ones
-#   bash freedv_guard.sh restore   put the saved audio settings back (FreeDV must be closed)
-#   bash freedv_guard.sh run       wait for the radio's audio devices, restore the saved audio
+#   bash freedv-guard.sh save      remember the current audio settings as the good ones
+#   bash freedv-guard.sh check     show how the current audio settings differ from the saved ones
+#   bash freedv-guard.sh restore   put the saved audio settings back (FreeDV must be closed)
+#   bash freedv-guard.sh run       wait for the radio's audio devices, restore the saved audio
 #                                  settings, start FreeDV, and restore them again when it exits
 #
 # Only the [Audio...] sections of FreeDV's .conf files are saved and restored; everything else in
@@ -108,10 +108,10 @@ do_check() {
         [ -e "$g" ] || continue
         f="$CONF_DIR/$(basename "$g")"
         [ -e "$f" ] || { echo "$(basename "$g"): missing from $CONF_DIR"; same=0; continue; }
-        if ! diff <(audio_section "$g") <(audio_section "$f") >/tmp/freedv_guard.diff; then
+        if ! diff <(audio_section "$g") <(audio_section "$f") >/tmp/freedv-guard.diff; then
             same=0
             echo "$(basename "$g"): audio settings differ (< saved, > now):"
-            sed 's/^/   /' /tmp/freedv_guard.diff
+            sed 's/^/   /' /tmp/freedv-guard.diff
         fi
     done
     [ $same -eq 1 ] && echo "Audio settings match the saved copy."
@@ -142,7 +142,7 @@ do_run() {
     BIN=${FREEDV_BIN:-$(command -v freedv)}
     if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
         echo "Cannot find the FreeDV program. Set FREEDV_BIN, for example:"
-        echo "  FREEDV_BIN=\$HOME/freedv-gui/build_linux/src/freedv bash freedv_guard.sh run"
+        echo "  FREEDV_BIN=\$HOME/freedv-gui/build_linux/src/freedv bash freedv-guard.sh run"
         exit 1
     fi
     if [ "$WAIT" -gt 0 ] && [ -z "$FORCE" ]; then

@@ -5,9 +5,9 @@
 Tools for operating a Yaesu FT-991A from another computer over a network such as
 [Tailscale](https://tailscale.com), or from the same computer:
 
-- **`ft991a_panel.py`** is a compact control panel with a **Radio** tab, an **Audio** tab, a
+- **`ft991a-panel.py`** is a compact control panel with a **Radio** tab, an **Audio** tab, a
   **Function** tab and a **Menu** tab.
-- **`freedv_audio_bridge.py`** is a UDP audio bridge that carries the radio's USB audio and your
+- **`audio-bridge.py`** is a UDP audio bridge that carries the radio's USB audio and your
   transmit audio, for voice and for [FreeDV](https://freedv.org).
 
 | Radio tab | Audio tab |
@@ -90,12 +90,12 @@ On the radio's computer, make the radio's CAT port reachable (ser2net for raw CA
 and start the audio bridge:
 
 ```
-python3 freedv_audio_bridge.py list          # shows the audio devices
-python3 freedv_audio_bridge.py server --bind YOUR-TAILSCALE-ADDRESS \
+python3 audio-bridge.py list          # shows the audio devices
+python3 audio-bridge.py server --bind YOUR-TAILSCALE-ADDRESS \
     --in-dev "<radio capture device>" --out-dev "<radio playback device>" --wait
 ```
 
-`freedv-audio-bridge.service` runs the same thing in the background as a systemd user service. Add
+`audio-bridge.service` runs the same thing in the background as a systemd user service. Add
 `--pin-volumes 100` to keep the PulseAudio / PipeWire volumes of the radio's sound card, and of the
 bridge's own streams, from being turned down (every correction is logged).
 
@@ -105,20 +105,20 @@ On the operating computer:
 pip install sounddevice      # for the Audio tab
 pip install numpy            # optional, for noise reduction
 pip install opuslib          # optional, for Opus (also needs the Opus library)
-python3 ft991a_panel.py --host YOUR-RADIO-COMPUTER --port 9000 --backend cat
+python3 ft991a-panel.py --host YOUR-RADIO-COMPUTER --port 9000 --backend cat
 ```
 
 To try the panel without a radio:
 
 ```
-python3 fake_ft991a.py --port 4533 --demo
-python3 ft991a_panel.py --host 127.0.0.1 --port 4533 --backend cat
+python3 fake-ft991a.py --port 4533 --demo
+python3 ft991a-panel.py --host 127.0.0.1 --port 4533 --backend cat
 ```
 
 The panel needs only Python 3 and tkinter. The Audio tab also needs `sounddevice`
 and the noise reduction needs numpy (without it that one feature is greyed out). On Windows,
-put a 64-bit `opus.dll` next to `ft991a_panel.py` to use Opus. The panel remembers its settings in
-`~/.ft991a_panel.json`.
+put a 64-bit `opus.dll` next to `ft991a-panel.py` to use Opus. The panel remembers its settings in
+`~/.ft991a-panel.json`.
 
 ## Installers (no Python needed)
 
@@ -131,35 +131,35 @@ with the version in the file names:
   (program on its own).
 
 To make a new build, open the **Actions** tab, choose **Build installers** and click **Run
-workflow**, leaving the Version box empty (the version is the one in `ft991a_panel.py`). The
+workflow**, leaving the Version box empty (the version is the one in `ft991a-panel.py`). The
 finished files are attached to a draft release; publish it to put them on the Releases page.
 
 The `MacOS/` and `Windows/` folders have a README each with the details, including how to get past
 the first-start warnings from macOS and Windows (the apps are not signed). Every build checks itself
 before it is published: the program starts and reports whether Tk, numpy, the sound library and Opus
-are really inside it, and the build stops if the program is not the version in `ft991a_panel.py`.
+are really inside it, and the build stops if the program is not the version in `ft991a-panel.py`.
 
-You can also build on your own computer: `bash packaging/build_macos.sh` or
-`packaging\build_windows.bat`.
+You can also build on your own computer: `bash packaging/build-macos.sh` or
+`packaging\build-windows.bat`.
 
 ## Files
 
 | File | Runs on | What it is |
 | --- | --- | --- |
-| `ft991a_panel.py` | the operating computer | The control panel. It is one self-contained file and includes the client side of the audio engine. |
-| `freedv_audio_bridge.py` | the radio's computer | The UDP audio bridge: `server`, `client` and `list` modes, PCM or Opus. |
-| `freedv_audio_bridge_gui.py` | either | A window for the bridge. It needs `freedv_audio_bridge.py` in the same folder. |
-| `freedv-audio-bridge.service` | the radio's computer | systemd user service that runs the bridge server in the background. |
-| `radio_power.sh` | the radio's computer | Switches the radio on or off over its CAT port. |
-| `freedv_guard.sh` | the radio's computer | Keeps FreeDV's audio device settings from being overwritten. |
+| `ft991a-panel.py` | the operating computer | The control panel. It is one self-contained file and includes the client side of the audio engine. |
+| `audio-bridge.py` | the radio's computer | The UDP audio bridge: `server`, `client` and `list` modes, PCM or Opus. |
+| `audio-bridge-gui.py` | either | A window for the bridge. It needs `audio-bridge.py` in the same folder. |
+| `audio-bridge.service` | the radio's computer | systemd user service that runs the bridge server in the background. |
+| `radio-power.sh` | the radio's computer | Switches the radio on or off over its CAT port. |
+| `freedv-guard.sh` | the radio's computer | Keeps FreeDV's audio device settings from being overwritten. |
 | `rigtest.sh`, `nettest.sh` | the radio's computer | Diagnostics for `rigctld` and Hamlib's network client. They never key the transmitter. |
 | `udpseq.py` | both ends | UDP packet-loss tester that sends packets the way the bridge does. |
 | `wavstat.py` | any | Summarises a bridge debug WAV file: level, continuity and tone frequency. |
-| `fake_ft991a.py` | any | A simulated FT-991A for the raw CAT connection. |
-| `fake_rigctld.py` | any | A simulated `rigctld`. |
-| `fake_cwdaemon.py` | any | A simulated `cwdaemon`, to try the Keyboard page without a radio. |
+| `fake-ft991a.py` | any | A simulated FT-991A for the raw CAT connection. |
+| `fake-rigctld.py` | any | A simulated `rigctld`. |
+| `fake-cwdaemon.py` | any | A simulated `cwdaemon`, to try the Keyboard page without a radio. |
 | `Contributions/` | | `opus.dll`, a 64-bit build of the Opus codec library (libopus 1.6.1) for Windows, with its readme. The Windows program and installer use it. |
-| `packaging/` | | The recipe, build scripts and icons (`packaging/icons/`) for the macOS and Windows installers. The version number lives in `ft991a_panel.py`. |
+| `packaging/` | | The recipe, build scripts and icons (`packaging/icons/`) for the macOS and Windows installers. The version number lives in `ft991a-panel.py`. |
 | `.github/workflows/build.yml` | GitHub | Builds the installers. |
 | `LICENSE`, `NOTICE.md`, `THIRD-PARTY-LICENSES.txt` | | The GNU General Public License, the credits, and the licences of the software that the installers include. |
 | `MacOS/`, `Windows/` | | A README for each installer. The installers themselves are on the Releases page. |

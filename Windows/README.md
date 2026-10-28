@@ -4,9 +4,9 @@ These files are built by GitHub, because a Windows program can only be built on 
 them from the **Releases** page of this repository. The version is in the file names.
 
 To make a new build, go to **Actions**, choose **Build installers**, then **Run workflow**, and leave
-the Version box empty: the version is the one in `ft991a_panel.py`. The finished files are attached to
+the Version box empty: the version is the one in `ft991a-panel.py`. The finished files are attached to
 a *draft* release; publish it to make them public. A build stops with an error if the program it made
-is not the version in `ft991a_panel.py`.
+is not the version in `ft991a-panel.py`.
 
 | File | What it is |
 | --- | --- |
@@ -27,4 +27,4 @@ Both contain Python, Tk, the sound library and the Opus library (`opus.dll`, fro
   such as VB-Cable A and B from https://vb-audio.com/Cable/ . Without them, choose "(direct)" for the
   radio ends of the Audio tab. The manual explains which side of each cable goes where.
 - Windows must allow desktop apps to use the microphone (Settings, then Privacy, then Microphone).
-- Settings are kept in `C:\Users\<you>\.ft991a_panel.json`.
+- Settings are kept in `C:\Users\<you>\.ft991a-panel.json`.

@@ -19,8 +19,8 @@
 
 # PyInstaller recipe for the FT-991A panel, for both macOS and Windows.
 # Do not run it directly; use the build script for your system:
-#     macOS:    bash packaging/build_macos.sh
-#     Windows:  packaging\build_windows.bat
+#     macOS:    bash packaging/build-macos.sh
+#     Windows:  packaging\build-windows.bat
 #
 # The panel is one self-contained Python file, so there is little to collect. What the packaged
 # program needs besides Python and Tk is the Opus library, which is added here:
@@ -34,9 +34,9 @@ import sys
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 ICONS = os.path.join(ROOT, "packaging", "icons")
 def _panel_version():
-    """The version in ft991a_panel.py, unless the build script says otherwise."""
+    """The version in ft991a-panel.py, unless the build script says otherwise."""
     import re
-    with open(os.path.join(ROOT, "ft991a_panel.py"), encoding="utf-8") as f:
+    with open(os.path.join(ROOT, "ft991a-panel.py"), encoding="utf-8") as f:
         m = re.search(r'^__version__ = "([^"]+)"', f.read(), re.M)
     return m.group(1) if m else "0.0.0"
 
@@ -50,7 +50,7 @@ elif sys.platform == "darwin" and os.environ.get("LIBOPUS"):
     binaries.append((os.environ["LIBOPUS"], "."))
 
 a = Analysis(
-    [os.path.join(ROOT, "ft991a_panel.py")],
+    [os.path.join(ROOT, "ft991a-panel.py")],
     pathex=[ROOT],
     binaries=binaries,
     # the licence files travel inside every packaged program (see license_dir() in the panel)

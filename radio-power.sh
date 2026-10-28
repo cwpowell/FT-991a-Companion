@@ -17,11 +17,11 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# radio_power.sh - switch the FT-991A on or off, or ask whether it answers, over its CAT port.
+# radio-power.sh - switch the FT-991A on or off, or ask whether it answers, over its CAT port.
 #
-#   bash radio_power.sh on
-#   bash radio_power.sh off
-#   bash radio_power.sh status
+#   bash radio-power.sh on
+#   bash radio-power.sh off
+#   bash radio-power.sh status
 #
 # The CAT manual says the PS (power switch) set command, for ON *and* OFF, needs dummy data
 # sent first and the command sent between one and two seconds later. This script does that.
@@ -39,7 +39,7 @@ case "$ACTION" in
     on)     P=1 ;;
     off)    P=0 ;;
     status) P= ;;
-    *) echo "usage: bash radio_power.sh on|off|status"; exit 2 ;;
+    *) echo "usage: bash radio-power.sh on|off|status"; exit 2 ;;
 esac
 
 if [ ! -e "$DEV" ]; then

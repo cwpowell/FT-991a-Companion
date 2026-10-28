@@ -18,8 +18,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-freedv_audio_bridge.py - bidirectional radio audio over UDP, for remote FreeDV.
-Supports raw PCM or Opus.  Command-line version (see freedv_audio_bridge_gui.py
+audio-bridge.py - bidirectional radio audio over UDP, for operating a radio remotely: voice,
+FreeDV, or any other program. Supports raw PCM or Opus.  Command-line version (see audio-bridge-gui.py
 for the graphical front end, which uses this file as its engine).
 
   SERVER (next to the radio):
@@ -44,9 +44,9 @@ Requires:  pip install sounddevice opuslib
            macOS: brew install opus, Windows: opus.dll next to this script)
 
 Examples:
-  python freedv_audio_bridge.py list
-  python freedv_audio_bridge.py server --codec opus --in-dev "USB Audio CODEC" --out-dev "USB Audio CODEC"
-  python freedv_audio_bridge.py client --codec opus --host 192.168.1.50 --out-dev "CABLE Input" --in-dev "CABLE-B Output"
+  python audio-bridge.py list
+  python audio-bridge.py server --codec opus --in-dev "USB Audio CODEC" --out-dev "USB Audio CODEC"
+  python audio-bridge.py client --codec opus --host 192.168.1.50 --out-dev "CABLE Input" --in-dev "CABLE-B Output"
 """
 import argparse
 import array
