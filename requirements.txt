@@ -7,3 +7,4 @@ numpy
 
 # Optional, for the Opus codec. It also needs the Opus library (libopus; opus.dll on Windows).
 opuslib
+# pyserial        only for keying-daemon.py, on the radio's computer

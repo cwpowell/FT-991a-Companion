@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.1
+
+- **A keying daemon, `keying-daemon.py`** (new; the panel does not use it yet). It runs on the radio's
+  computer and keys the radio through the DTR line of its second USB serial port, the way RemoteRig keeps
+  its timing: key events carry the sender's clock, and the daemon plays them back after a fixed delay (the
+  jitter buffer, 150 ms by default), so the spacing a paddle made is the spacing the radio gets, whatever the
+  network did. Run it by hand, or with `keying-daemon.service`. It also understands cwdaemon's text
+  commands on UDP port 6789 (text, `ESC 0`, `ESC 2`, `ESC 4` and `ESC h`), so the CW window's text box works
+  with it unchanged, and only one program has to own the serial port.
+  - Measured over real UDP on one machine, with the sender's heartbeats: with up to 120 ms of random delay
+    and reordered packets the worst error in the spacing of 49 elements was under 1 ms, and with 2% of
+    the packets lost it was 0.0 ms. A very bad link (30% loss, or delays well above the buffer) degrades
+    but keeps the elements in order.
+  - The delay is learnt from the sender's clock in every packet and kept fixed while keying is going on,
+    because changing it in the middle would move later elements against earlier ones. The tests found
+    exactly that fault in a first version.
+  - **The key is let go** when packets stop while it is down (0.8 s), when it has been down too long (3 s),
+    on an abort packet, when key events arrive while text is being sent (the operator's hand wins), and
+    when the daemon stops or receives SIGTERM. The serial line is opened low. Packets can be limited with
+    `--token` and `--allow`. All of this is tested, including a real process receiving SIGTERM.
+  - `tests/test-keying-daemon.py` is the test (it needs pyserial for one part, `pip install pyserial`).
+  - Nothing here touches a radio yet. The panel side (the keyer and the sender) comes next.
+- The program version is 1.2.1.
+
 ## 1.2.0
 
 - **The CW text box and macros are in a separate window.** The **CW window** button beside the log (on

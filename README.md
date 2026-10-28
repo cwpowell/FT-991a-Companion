@@ -156,6 +156,9 @@ You can also build on your own computer: `bash packaging/build-macos.sh` or
 | `audio-bridge.py` | the radio's computer | The UDP audio bridge: `server`, `client` and `list` modes, PCM or Opus. |
 | `audio-bridge-gui.py` | either | A window for the bridge. It needs `audio-bridge.py` in the same folder. |
 | `audio-bridge.service` | the radio's computer | systemd user service that runs the bridge server in the background. |
+| `keying-daemon.py` | the radio's computer | Keys the radio through a serial port's DTR line from far away, with the timing of timestamped key events kept by a jitter buffer. It also understands cwdaemon's text commands. Needs `pyserial`. Not used by the panel yet. |
+| `keying-daemon.service` | the radio's computer | systemd user service that runs the keying daemon. |
+| `tests/test-keying-daemon.py` | any | Tests for the keying daemon. They touch no radio. |
 | `radio-power.sh` | the radio's computer | Switches the radio on or off over its CAT port. |
 | `freedv-guard.sh` | the radio's computer | Keeps FreeDV's audio device settings from being overwritten. |
 | `rigtest.sh`, `nettest.sh` | the radio's computer | Diagnostics for `rigctld` and Hamlib's network client. They never key the transmitter. |

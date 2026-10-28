@@ -1,0 +1,68 @@
+# FT-991A Companion
+# Copyright (C) 2026  Charles W. Powell, NK8O
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Audio bridge: the server side, running in the background on the radio's computer.
+#
+# Install (as the user who is logged in to the desktop and owns the radio's sound devices):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp audio-bridge.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now audio-bridge
+#   loginctl enable-linger "$USER"          # keep it running when you are not logged in
+#
+# Watch it:   journalctl --user -u audio-bridge -f
+# Stop it:    systemctl --user stop audio-bridge
+#
+# Before you start it, close the bridge window (audio-bridge-gui.py) and any other copy
+# of the bridge: only one program can use UDP port 5800.
+#
+# Edit the three things marked CHANGE:
+
+[Unit]
+Description=Keying daemon (server): keys the radio from far away
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+
+# CHANGE 1: where keying-daemon.py is (%h is your home folder), and the Python that runs it by hand.
+# CHANGE 2: --device is the radio's SECOND USB serial port (the one that is not used for CAT).
+#           Use the name from  ls /dev/serial/by-id  because the numbers (ttyUSB0, ttyUSB1) can change.
+#           Your user must be allowed to open it (on most systems: sudo usermod -aG dialout $USER).
+# CHANGE 3: replace YOUR-TAILSCALE-ADDRESS with this computer's Tailscale address (tailscale ip -4), so the
+#           daemon is reachable only over the tailnet. It has no password of its own; --token adds a number
+#           that packets must carry, and --allow limits the addresses that may key the radio.
+#
+# On the radio set menu 060 PC KEYING to DTR. Only one program can own the serial port, so stop cwdaemon
+# if it is running: this daemon understands cwdaemon's text commands on the same UDP port (6789).
+#
+# The key is let go when the service stops, and also when packets stop arriving while it is down
+# (--dead-man), when it has been down too long (--max-down), and on an abort.
+ExecStart=/usr/bin/python3 %h/keying-daemon.py \
+    --device /dev/serial/by-id/CHANGE-ME-radio-second-port --line dtr \
+    --bind YOUR-TAILSCALE-ADDRESS --port 6790 --text-port 6789 \
+    --buffer-ms 150 --max-down 3 --dead-man 0.8
+
+# If the Tailscale address does not exist yet at boot, the daemon cannot bind, exits, and is started again
+# every 5 seconds until it can.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

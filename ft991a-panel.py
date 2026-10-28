@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.2.0"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.2.1"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
