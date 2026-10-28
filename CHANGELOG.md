@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0
+
+- **The CW text box and macros are in a separate window.** The **CW window** button beside the log (on
+  every tab of the main window) shows and hides it; the button reads **Hide CW** while it is open. The
+  window holds the text box with **Send** and **Abort**, the speed, your call and theirs, the five
+  macros, the cwdaemon address, and a **Zero in** button (the radio's CW auto zero-in, which used to be
+  on the Memory page). It remembers where it was and whether it was open, and a saved position that is
+  off the screen is not trusted. Closing it with its own close button only hides it.
+- Closing the panel while a message is being keyed now sends an **abort**, as PTT already lets go.
+- A space typed into the CW window, or pressed on one of its buttons, never keys the transmitter
+  (tested).
+- **The Memory page is gone**, and with it the radio-memory code (`KM`, `KY` and the memory-type checks).
+  It worked, but cwdaemon does the same job better, with no 50-character limit. The facts it
+  established are kept in `SESSION-NOTES.md`, and the code is in the history (version 1.1.1).
+- The Function tab has five pages again: Receive, Noise, Transmit, CW and FM etc.
+
 ## 1.1.2
 
 - **The window title is now "FT-991a Companion 1.1.2"** (it was "FT-991A Remote Panel"). `--version`,

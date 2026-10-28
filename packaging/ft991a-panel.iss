@@ -21,7 +21,7 @@
 ; It expects dist\FT-991A-Panel.exe to have been built already.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.2"
+  #define AppVersion "1.2.0"
 #endif
 
 [Setup]

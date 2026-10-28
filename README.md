@@ -47,17 +47,23 @@ The screenshots were taken against the simulated radio in this repository.
 
 **Function tab**
 
-- The radio's front-panel functions in seven small pages: **Receive** (preamp, attenuator, RF gain,
+- The radio's front-panel functions in five small pages: **Receive** (preamp, attenuator, RF gain,
   squelch, contour, audio peak filter), **Noise** (noise blanker, the radio's own DNR noise
   reduction, auto and manual notch), **Transmit** (speech processor, mic equalizer, mic gain,
-  monitor, VOX), **CW** (keyer, break-in, speed, pitch, delay, CW spot), **Memory** (edit and play
-  the radio's five CW memories), **Keyboard** (type text or press a macro, and
-  [cwdaemon](https://github.com/acerion/cwdaemon) on the radio's computer keys the radio) and
-  **FM etc** (repeater shift, CTCSS tone, dial lock, fast step).
+  monitor, VOX), **CW** (keyer, break-in, speed, pitch, delay, CW spot) and **FM etc** (repeater
+  shift, CTCSS tone, dial lock, fast step).
 - It reads the page that is showing, so a change made on the radio appears here. Every change is
   read back, a function the radio does not answer in its present mode is greyed out, VOX asks
   before it is turned on, and the mouse wheel never changes a setting. It needs the raw CAT
   connection.
+
+**CW window** (the **CW window** button beside the log, on every tab)
+
+- A separate window, which remembers where it was, with a text box, a speed, your call and theirs, and
+  five macros (`[MYCALL]` and `[CALL]` are filled in). [cwdaemon](https://github.com/acerion/cwdaemon),
+  running on the radio's computer, sends the Morse, so the network cannot spoil the timing. The panel
+  tells you when a message has finished, **Abort** stops it at once, and **Zero in** starts the radio's CW
+  auto zero-in. It refuses unless the radio is in a CW mode and not transmitting.
 
 **Menu tab**
 
@@ -182,8 +188,8 @@ Developed against the simulators in this repository. The maintainer has run it a
 FT-991A over ser2net from macOS: the control panel, remote power on and off, push-to-talk, and
 audio in both directions with PCM and Opus,  and the local-radio audio mode. The Function tab, the 
 Band pull-down and the noise reduction have also been tested and seem to function within normal 
-operating parameters. The CW Memory page has been tested on the radio and works well. The Keyboard page
-has so far been tested only against the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
+operating parameters. The CW window has so far been tested only against the simulators and the real
+`cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
 an issue with the log and the status text from the Audio tab.
 
 ## Documentation
