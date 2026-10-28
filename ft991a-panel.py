@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.2.1"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.3.0"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -2488,6 +2488,110 @@ class CwDaemonLink:
         return late
 
 
+KEYD_PORT = 6790
+
+
+class KeyEventSender:
+    """Sends key-down and key-up to keying-daemon.py, which runs on the radio's computer and keys the radio
+    through a serial line, replaying the events after a fixed delay so that their spacing is exactly the
+    spacing made here. The packet layout is described in keying-daemon.py.
+
+    Every packet carries this program's clock (milliseconds since the sender was made) and repeats the last
+    few events, so that a lost packet is repaired by the next one. While it is armed, a ping goes out every
+    100 ms: the daemon learns how long packets take from them before the first element arrives, and notices
+    a broken connection while the key is down. Each event packet is sent twice, a few milliseconds apart.
+    An abort lets the key go at once."""
+    MAGIC, VERSION = b"KL", 1
+    T_EVENTS, T_PING, T_ABORT = 1, 2, 3
+    HEAD = struct.Struct(">2sBBHIIB")
+    EVENT = struct.Struct(">IB")
+    REPEAT, PING_EVERY, DUPLICATE_AFTER, HANG = 6, 0.1, 0.008, 1.5
+
+    def __init__(self):
+        self.sock = None
+        self.target, self.token = None, 0
+        self.t0 = time.perf_counter()
+        self.seq = 0
+        self.recent = collections.deque(maxlen=self.REPEAT)
+        self.lock = threading.Lock()
+        self.armed, self.down, self.last_edge = False, False, 0.0
+        self._stop = threading.Event()
+        self._thread = None
+
+    def now_ms(self, at=None):
+        return int(((time.perf_counter() if at is None else at) - self.t0) * 1000) & 0xFFFFFFFF
+
+    def set_target(self, host_port, token=0):
+        self.target, self.token = host_port, int(token) & 0xFFFF
+
+    def _packet(self, kind, events):
+        self.seq = (self.seq + 1) & 0xFFFFFFFF
+        return self.HEAD.pack(self.MAGIC, self.VERSION, kind, self.token, self.seq, self.now_ms(), len(events)) + \
+            b"".join(self.EVENT.pack(t, int(st)) for t, st in events)
+
+    def _send(self, data):
+        if self.target is None:
+            return
+        if self.sock is None:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            self.sock.sendto(data, self.target)
+        except OSError:
+            pass                                         # no route yet: the next ping will try again
+
+    def active(self):
+        """Is the key down, or was it moved lately (the radio may still be transmitting)?"""
+        return self.down or time.perf_counter() - self.last_edge < self.HANG
+
+    def edge(self, down, at=None):
+        """The key went down or up (at: a perf_counter time, if the device knows it better than now)."""
+        with self.lock:
+            self.recent.append((self.now_ms(at), bool(down)))
+            self.down, self.last_edge = bool(down), time.perf_counter()
+            data = self._packet(self.T_EVENTS, list(self.recent))
+        self._send(data)
+        timer = threading.Timer(self.DUPLICATE_AFTER, self._send, (data,))
+        timer.daemon = True
+        timer.start()
+
+    def ping(self):
+        with self.lock:
+            data = self._packet(self.T_PING, list(self.recent))
+        self._send(data)
+
+    def abort(self):
+        """Let the key go now, and forget what was pending."""
+        with self.lock:
+            self.down, self.recent = False, collections.deque(maxlen=self.REPEAT)
+            data = self._packet(self.T_ABORT, [])
+        self._send(data)
+        timer = threading.Timer(0.01, self._send, (data,))
+        timer.daemon = True
+        timer.start()
+
+    def arm(self):
+        if self.armed:
+            return
+        self.armed = True
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self._thread.start()
+
+    def _heartbeat(self):
+        while not self._stop.wait(self.PING_EVERY):
+            self.ping()
+
+    def disarm(self):
+        if self.down:
+            self.abort()
+        self.armed = False
+        self._stop.set()
+
+    def close(self):
+        self.abort()
+        self.disarm()
+
+
 class CwKeyboard:
     """The inside of the CW window: type text, or press a macro, and cwdaemon (running on the
     radio's computer) keys the radio with it. Abort stops it at once."""
@@ -2504,6 +2608,10 @@ class CwKeyboard:
         self.host = tk.StringVar(value=str(c.get("cwd_host", "")))
         self.port = tk.StringVar(value=str(c.get("cwd_port", CWD_PORT)))
         self.status = tk.StringVar(value="Ready.")
+        self.keyd_port = tk.StringVar(value=str(c.get("keyd_port", KEYD_PORT)))
+        self.armed_var = tk.BooleanVar(value=False)
+        self.sender = KeyEventSender()
+        self.sender.token = int(c.get("keyd_token", 0) or 0) & 0xFFFF
         saved = c.get("cw_macros")
         macros = list(saved) if isinstance(saved, (list, tuple)) and len(saved) == 5 else list(CWD_MACROS)
         self.macros = [tk.StringVar(value=str(m)) for m in macros]
@@ -2546,21 +2654,33 @@ class CwKeyboard:
         ttk.Entry(hf, textvariable=self.host, width=17).grid(row=0, column=1, padx=3)
         ttk.Label(hf, text="port").grid(row=0, column=2)
         ttk.Entry(hf, textvariable=self.port, width=6).grid(row=0, column=3, padx=3)
+        kf = ttk.Frame(box)
+        kf.grid(row=9, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        ttk.Label(kf, text="Key").grid(row=0, column=0)
+        self.arm_chk = ttk.Checkbutton(kf, text="Arm", variable=self.armed_var, command=self.on_arm)
+        self.arm_chk.grid(row=0, column=1, padx=(6, 2))
+        ttk.Label(kf, text="daemon port").grid(row=0, column=2, padx=(8, 3))
+        ttk.Entry(kf, textvariable=self.keyd_port, width=6).grid(row=0, column=3)
+        self.test_key = ttk.Button(kf, text="Test key (hold)", style="Compact.TButton")
+        self.test_key.grid(row=0, column=4, padx=(10, 0))
+        self.test_key.bind("<ButtonPress-1>", self.on_key_press)
+        self.test_key.bind("<ButtonRelease-1>", self.on_key_release)
         ttk.Label(box, textvariable=self.status, foreground="#333333", wraplength=380,
-                  justify="left").grid(row=9, column=0, columnspan=5, sticky="w", pady=(4, 0))
+                  justify="left").grid(row=10, column=0, columnspan=5, sticky="w", pady=(4, 0))
         ttk.Label(box, foreground="#666666", wraplength=380, justify="left", text=(
             "Needs cwdaemon on the radio's computer (cwdaemon -n -d <the radio's second serial port> "
             "-x n) and the radio's menu 060 PC KEYING set to DTR. In macros, [MYCALL] and [CALL] are "
             "replaced. Prosigns: * AR, = BT, < SK, ( KN, ! SN, & AS, > BK. + and - are left out. A blank "
             "address means the radio's computer.")
-        ).grid(row=10, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        ).grid(row=11, column=0, columnspan=5, sticky="w", pady=(4, 0))
         self.on_speed()
 
     def settings(self):
         """What the panel keeps between runs."""
         return dict(cw_wpm=self.wpm.get(), cw_mycall=self.mycall.get().strip(),
                     cw_macros=[m.get() for m in self.macros], cwd_host=self.host.get().strip(),
-                    cwd_port=self.port.get().strip())
+                    cwd_port=self.port.get().strip(), keyd_port=self.keyd_port.get().strip(),
+                    keyd_token=self.sender.token)
 
     def on_speed(self):
         self.speed_lbl.configure(text=f"{int(round(self.wpm.get()))} wpm")
@@ -2582,7 +2702,8 @@ class CwKeyboard:
             return "the panel is not connected to the radio"
         if p.nr_cal.active:
             return "a noise calibration is running, and the radio is on another frequency"
-        if (s.get("ptt") or p.ptt_down or s.get("tuning") or p.tune_deadline) and not self.link.waiting:
+        if (s.get("ptt") or p.ptt_down or s.get("tuning") or p.tune_deadline) \
+                and not self.link.waiting and not self.sender.active():
             return "the radio is transmitting or tuning"
         if s.get("mode") not in ("CW", "CWR"):
             return "the radio is not in a CW mode (CW-U or CW-L)"
@@ -2650,7 +2771,55 @@ class CwKeyboard:
     def on_macro(self, i):
         self.send_text(self.macros[i].get())
 
+    def key_target(self):
+        host = self.target()
+        try:
+            port = int(self.keyd_port.get().strip() or KEYD_PORT)
+        except ValueError:
+            return None
+        return (host[0], port) if host and 1024 <= port <= 65535 else None
+
+    def on_arm(self):
+        if self.armed_var.get():
+            target = self.key_target()
+            if target is None:
+                self.armed_var.set(False)
+                return self.refuse("there is no usable address or port for the keying daemon", "Not armed")
+            self.sender.set_target(target)
+            self.sender.arm()
+            self.status.set(f"Armed: sending a heartbeat to {target[0]}:{target[1]} every 100 ms.")
+            self.panel.append_log(f"CW key: armed, keying daemon at {target[0]}:{target[1]}")
+        else:
+            self.sender.disarm()
+            self.status.set("Not armed.")
+            self.panel.append_log("CW key: disarmed")
+
+    def on_key_press(self, event=None):
+        """The test key, held down like a straight key."""
+        why = self.reason_not_to_send()
+        if why:
+            self.refuse(why, "Key not sent")
+            return "break"
+        target = self.key_target()
+        if target is None:
+            self.refuse("there is no usable address or port for the keying daemon", "Key not sent")
+            return "break"
+        if not self.sender.armed:                       # the first element is better when armed a moment before
+            self.armed_var.set(True)
+            self.sender.set_target(target)
+            self.sender.arm()
+            self.status.set("Armed now. The first element is best when you arm a moment before keying.")
+        self.sender.set_target(target)
+        self.sender.edge(True)
+        return None
+
+    def on_key_release(self, event=None):
+        if self.sender.down:
+            self.sender.edge(False)
+        return None
+
     def on_abort(self):
+        self.sender.abort()                           # the key lets go at once, and whatever was pending is forgotten
         target = self.target()
         if target is None:
             return
@@ -2659,7 +2828,11 @@ class CwKeyboard:
         self.panel.append_log("CW keyboard: abort sent")
 
     def refresh(self, now):
-        """Called often while the page is showing."""
+        """Called often while the window is showing."""
+        if self.sender.down and not self.panel.radio.connected:
+            self.sender.abort()                       # the radio is gone: never leave the key down
+            self.status.set("Key released: the connection to the radio was lost.")
+            self.panel.append_log("CW key: released, the connection to the radio was lost")
         for _token, took in self.link.poll():
             self.status.set(f"Finished, in {took:.1f} s.")
         for _token in self.link.overdue(now):
@@ -2713,6 +2886,8 @@ class CwWindow:
         self.panel.cw_btn.configure(text="Hide CW")
 
     def hide(self):
+        if self.kb.sender.down:
+            self.kb.sender.edge(False)                   # a hidden window must not leave the key down
         if self.visible():
             self.geometry = f"+{self.top.winfo_x()}+{self.top.winfo_y()}"
         self.top.withdraw()
@@ -2728,8 +2903,9 @@ class CwWindow:
 
     def shutdown(self):
         """The panel is closing: a message that is being keyed must stop, as PTT lets go."""
-        if self.kb.link.waiting:
+        if self.kb.link.waiting or self.kb.sender.armed or self.kb.sender.down:
             self.kb.on_abort()
+        self.kb.sender.close()
 
     def settings(self):
         out = self.kb.settings()

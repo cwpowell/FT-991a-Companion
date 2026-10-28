@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.0
+
+- **The CW window can key the radio through the keying daemon.** A new **Key** row has **Arm**, the
+  daemon's port (6790) and a **Test key (hold)** button that works like a straight key: key down while you
+  hold it, key up when you let go. The events go to `keying-daemon.py` on the radio's computer, which
+  replays them with their spacing kept.
+  - While armed, the panel sends a heartbeat every 100 ms carrying its clock, so that the daemon knows how
+    long packets take before the first element arrives. Each key event is sent twice, a few milliseconds
+    apart, and every packet repeats the last six events.
+  - Tested from the panel's button through UDP to the daemon's line (a simulated line): a 250 ms hold
+    came out as 251.0 ms, and a run of 12 elements of different lengths kept their spacing to within 2.0 ms,
+    including the timing of the button itself.
+  - It refuses as the text box does (not in a CW mode, not during a noise calibration, not while the radio
+    transmits for another reason), but a second element is not refused while this panel is the one keying.
+  - **The key is let go** when the connection to the radio is lost, when the CW window is hidden, when the
+    panel closes, on Abort, and (by the daemon) when packets stop.
+  - The daemon now counts the heartbeat pings in its statistics.
+  - This is the straight-key path. The paddle (iambic) and the MIDI input come next.
+
 ## 1.2.1
 
 - **A keying daemon, `keying-daemon.py`** (new; the panel does not use it yet). It runs on the radio's

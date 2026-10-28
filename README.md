@@ -63,7 +63,9 @@ The screenshots were taken against the simulated radio in this repository.
   five macros (`[MYCALL]` and `[CALL]` are filled in). [cwdaemon](https://github.com/acerion/cwdaemon),
   running on the radio's computer, sends the Morse, so the network cannot spoil the timing. The panel
   tells you when a message has finished, **Abort** stops it at once, and **Zero in** starts the radio's CW
-  auto zero-in. It refuses unless the radio is in a CW mode and not transmitting.
+  auto zero-in. It refuses unless the radio is in a CW mode and not transmitting. A **Key** row (**Arm**, and a
+  **Test key** that you hold like a straight key) sends key-down and key-up to `keying-daemon.py` on the
+  radio's computer, which keeps their timing exactly.
 
 **Menu tab**
 

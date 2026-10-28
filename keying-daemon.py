@@ -172,7 +172,7 @@ class Engine:
         self.last_activity = 0.0                            # when a key event was last queued or played
         self.text_end = 0.0                                  # when the text that is queued will have been sent
         self.timers = []
-        self.stats = dict(packets=0, events=0, duplicates=0, late=0, max_late_ms=0.0, forced_up=0, bad=0)
+        self.stats = dict(packets=0, pings=0, events=0, duplicates=0, late=0, max_late_ms=0.0, forced_up=0, bad=0)
         self.running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -247,6 +247,7 @@ class Engine:
         with self.cv:
             now = time.perf_counter() if now is None else now
             self.last_packet = now
+            self.stats["pings"] += 1
             self._sample(now, sent_ms)
 
     # ---- text -------------------------------------------------------------------------------------------
