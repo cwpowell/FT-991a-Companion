@@ -234,14 +234,17 @@ A **HaliKey MIDI** sends notes 20 and 21 (dit and dah), the defaults for MIDI pa
 starts in keyboard mode and needs the MIDI-mode message that the panel sends when you arm; its MIDI port must show in
 the Monitor's list of MIDI input ports, or there is nothing to send to.
 
-**Your serial key's lines.** Run Monitor, press each paddle in turn, and click Use what was seen. Lines that move together
+**Your serial key's lines.** Run Monitor, press the dot paddle and then the dash paddle, and press Stop monitor: the boxes are
+set from what you pressed (if they still held the defaults); **Use what was seen** does the same at any time. Lines that move together
 are one paddle (a HaliKey serial moves DSR and DCD together for one paddle and CTS alone for the other, so dit = CTS and
 dah = DSR, or the other way round).
 
 **Changing a setting while armed** (the device, port, notes, mode and the rest) re-opens the device at once; the status
 line names what is armed. **What you type and the macros are heard at the panel as a sidetone** with the keying's
-timing. **Mute radio tone** silences the radio's own sidetone while armed by setting its monitor level to 0 (and puts it
-back); this is unverified on the FT-991A. While you key, the meters are polled faster and hold their peaks for a moment.
+timing. **Mute radio speaker** (experimental) silences the radio's own sidetone at the radio by setting its AF gain to 0 while armed,
+and puts it back when you disarm or close the panel. It is not known that the FT-991A's USB audio is independent of AF
+gain: if the audio you hear at the panel goes quiet when you arm, untick the box. (The radio's monitor level was tried
+first and silenced the audio sent to your computer instead, not the speaker.) While you key, the meters are polled faster and hold their peaks for a moment.
 
 **If the radio sends a string of dits**, run the daemon with `--verbose`. If it prints `key DOWN` and `key up`
 again and again, the cause is on the panel's side: disarm, and use Monitor to check the device. If it prints

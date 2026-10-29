@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.5.1
+
+- **Mute radio tone is gone; Mute radio speaker replaces it.** Setting the radio's monitor level (`ML1`) to 0
+  silenced the audio that reaches your computer, not the sidetone at the radio's own speaker: the wrong thing, as you
+  found. The new box sets the radio's **AF gain** (`AG0`, the speaker volume) to 0 while armed, and puts it back when
+  you disarm, untick the box, restart the device, or close the panel. The monitor level is no longer touched. **This
+  is still an experiment**: nothing documents that the FT-991A's USB audio is independent of AF gain. If the audio you
+  hear at the panel goes quiet when you arm, untick the box. (If the panel is killed while it is muted, the radio's
+  speaker stays at 0 until you turn the AF knob.) The saved setting has a new name, so the old box is off.
+- **Stopping the Monitor applies what you pressed**, if the boxes still hold the device's defaults. You had to click
+  Use what was seen after pressing the paddles, and clicking it before pressing anything said "nothing has been seen":
+  your serial paddles were then armed with the old defaults (dit DSR, dah DCD) and behaved as before. Now: press
+  Monitor, press the dot paddle, then the dash paddle, press Stop monitor, and the boxes are set (dit CTS, dah DSR
+  for your HaliKey serial). Values you typed are never overwritten, and changing the device while the Monitor runs
+  applies nothing.
+- **The MIDI port list follows what is plugged in.** It was built from one cached look at the system, so a device
+  plugged in later never appeared, "no matter how many times" you replugged it. The **Refresh** button and opening
+  the Port list now look again; if the chosen MIDI port is gone and exactly one is there, it is chosen.
+- The Vail adapter set-up works (it answers the MIDI-mode message). No key press has yet been seen from it.
+- Confirmed by testing: straight key mode with the HaliKey MIDI works.
+- The daemon's timing tests retry (up to 3 times) a case that misses by 5 to 9 ms, because this suite saw such
+  blips on a shared machine; a real fault fails every time. The attempt is printed.
+
 ## 1.5.0
 
 From testing 1.4.4 with the HaliKey MIDI (iambic B works well at 20 and 32 wpm), a HaliKey serial key and a Vail adapter.
