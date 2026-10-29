@@ -106,6 +106,12 @@ eng, line, logs = new(); eng.feed([(0, True)]); time.sleep(0.4); eng.shutdown();
 eng, line, logs = new(); eng.feed([(0, True)]); time.sleep(0.4); eng.feed([(0, True)]); eng.feed([(0, True), (10, False)])
 print("   a repeated event is dropped, not played twice:", eng.stats["duplicates"], ok(eng.stats["duplicates"] == 2)); eng.shutdown()
 
+print("   two different events in the SAME millisecond are both kept (a paddle letting go as the other closes); a true repeat is not")
+eng, line, logs = new(); eng.feed([(5000, True), (5100, False), (5100, True)]); time.sleep(0.5); eng.feed([(5000, True), (5100, False), (5100, True), (5200, False)]); time.sleep(0.5)
+states = [st for _, st in line.log]
+print("   the line:", states, "| repeats dropped:", eng.stats["duplicates"], ok(states == [True, False, True, False] and eng.stats["duplicates"] == 3)); eng.shutdown()
+eng, line, logs = new(); eng.feed([(7000, True), (7060, False)]); time.sleep(0.4); eng.feed([(6990, False), (7060, False)])
+print("   an older event, and a repeat, are dropped:", eng.stats["duplicates"], ok(eng.stats["duplicates"] == 2 and eng.stats["events"] == 2)); eng.shutdown()
 print("--- 5. bad packets, a wrong token and an allow-list change nothing")
 eng, line, logs = new(); lst = kd.EventListener(eng, "127.0.0.1", 0, token=4242); lst.start(); s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); d = ("127.0.0.1", lst.port)
 for data in (b"", b"hello", packet(kd.T_EVENTS, [(0, True)], token=1), packet(kd.T_EVENTS, [(0, True)], token=4242)[:-2], packet(9, [], token=4242), kd.HEAD.pack(b"XX", 1, 1, 4242, 0, 0, 0), packet(kd.T_EVENTS, [(0, True)], token=0)):

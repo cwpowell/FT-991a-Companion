@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.4.4
+
+- **python-rtmidi no longer runs inside the panel at all.** On a Mac with Python 3.14, 1.4.3 still aborted ("Abort
+  trap: 6", `PyEval_RestoreThread ... the GIL is released`) when you armed a MIDI device, inside `rtmidi.MidiIn()`,
+  with CoreAudio running. The 1.4.2 guard only covered one moment (start-up); python-rtmidi can die on any call, and a
+  native crash cannot be caught. So every use of it now happens in a **separate helper process**:
+  - The panel starts itself as a helper (a hidden `--midi-helper` option; the packaged app starts itself the same
+    way). The helper connects back over a socket on this computer (not stdin/stdout, so it works from a Windows
+    program with no console) and does the listing, the opening of inputs and outputs, and the sending. MIDI messages
+    come back stamped with the moment the helper received them on `perf_counter`, which is one clock for every
+    process on a computer, so the keying keeps its exact timing.
+  - If the helper dies, whatever is keyed is let go, the window says why ("python-rtmidi crashed ... code -6"), the
+    log has it, and the panel carries on; disarm and arm again to start a new helper. Serial paddles, the test key
+    and the text are unaffected. If python-rtmidi simply cannot work on your Python, you get the same message.
+  - The Monitor and the Vail adapter's set-up use helpers too. The panel itself never loads python-rtmidi (the
+    self-test only checks that it is installed).
+  - Tested with a real helper process whose MIDI backend is a stand-in that can be made to crash: at start-up of
+    the helper, when a port is opened, and while a port is open with the key down (it is released); and with the
+    packaged program acting as the helper.
+- **Old events replayed when a device connects are ignored.** Your HaliKey MIDI sent a burst of old key events the
+  moment its port opened; those could have keyed the radio. For the first half second after opening, everything
+  from the device is ignored.
+- **The keying daemon no longer drops a real event that shares a millisecond with another.** It dropped any event
+  not strictly later than the last, so a paddle letting go as the other closed (the same millisecond) lost one of
+  them, and a key-down could vanish. Different events in the same millisecond are now both kept, and only a true
+  repeat or an older event is dropped. (Found by a test that reported a gap of 0 ms where there was almost a second.)
+- **Your HaliKey MIDI's log was read.** It uses notes 20 and 21 (the defaults, so MIDI paddles with dit 20 and dah 21
+  is right), puts its timing in the velocity, and uses a "polyphonic key pressure" message (A0) for gaps longer than
+  127 ms, which the handler already treats like a control change.
+- The Vail adapter's own documentation says it always boots in **keyboard mode** and needs the MIDI-mode message to
+  send notes (what the panel sends when armed), and that in passthrough it sends notes 1 and 2 with velocity 127. Its
+  MIDI port must be visible: if the Monitor's list of MIDI input ports does not show it, nothing can be sent to it.
+
 ## 1.4.3
 
 Fixes from trying 1.4.2 under Linux with a HaliKey serial key, a HaliKey MIDI and a Vail adapter.

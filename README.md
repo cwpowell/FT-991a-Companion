@@ -222,11 +222,17 @@ press Monitor again to stop, then tick **Arm**.
   "MIDI note N is not one of the notes in the box"). **If there is no tone,** use Test tone: it needs the
   `sounddevice` package (and, on Linux, `libportaudio2`).
 
-**MIDI devices need python-rtmidi to work.** Running from source on a very new Python (3.14, for example) it may
-crash. The panel asks it for the MIDI ports in a separate process first, so it will not take the panel down: it
-turns MIDI off and says why. If that happens, use Python 3.12 or 3.13, or the installer (built with 3.12). For
-example: `python3.12 -m venv ~/ft991a-venv`, then `~/ft991a-venv/bin/pip install numpy sounddevice opuslib pyserial
+**MIDI devices need python-rtmidi, which runs in a separate helper process.** python-rtmidi is a native library
+that can crash the program it runs in (it did, on a Mac with Python 3.14), so the panel never loads it: it starts
+itself as a helper to do all the MIDI work and talks to it over a socket on the same computer. If the helper dies,
+the keys are let go, the window says why, and the panel carries on; disarm and arm again to start a new one. If
+MIDI will not work on your Python, use Python 3.12 or 3.13, or the installer (built with 3.12): for example
+`python3.12 -m venv ~/ft991a-venv`, then `~/ft991a-venv/bin/pip install numpy sounddevice opuslib pyserial
 python-rtmidi`, then `~/ft991a-venv/bin/python ft991a-panel.py`.
+
+A **HaliKey MIDI** sends notes 20 and 21 (dit and dah), the defaults for MIDI paddles. A **Vail adapter** always
+starts in keyboard mode and needs the MIDI-mode message that the panel sends when you arm; its MIDI port must show in
+the Monitor's list of MIDI input ports, or there is nothing to send to.
 
 **If the radio sends a string of dits**, run the daemon with `--verbose`. If it prints `key DOWN` and `key up`
 again and again, the cause is on the panel's side: disarm, and use Monitor to check the device. If it prints

@@ -174,6 +174,7 @@ class Engine:
         self.down_since, self.held_by = None, None          # when the key went down, and who put it down
         self.last_packet = time.perf_counter()
         self.offset, self.last_t, self.last_sent = None, None, None
+        self.seen_at_last = set()                           # the (time, state) events already taken at the time last_t
         self.samples = collections.deque()                  # (arrival, how long the packet took), for the offset
         self.last_activity = 0.0                            # when a key event was last queued or played
         self.text_end = 0.0                                  # when the text that is queued will have been sent
@@ -214,7 +215,7 @@ class Engine:
         if self.last_sent is not None and ((self.last_sent - sent_ms) & 0xFFFFFFFF) < 0x80000000 \
                 and (self.last_sent - sent_ms) & 0xFFFFFFFF > CLOCK_JUMP_MS:
             self.samples.clear()                            # the sender restarted: start afresh
-            self.offset, self.last_t = None, None
+            self.offset, self.last_t, self.seen_at_last = None, None, set()
         self.last_sent = sent_ms
         self.samples.append((now, now - sent_ms / 1000.0))
         while self.samples and now - self.samples[0][0] > OFFSET_WINDOW:
@@ -223,6 +224,23 @@ class Engine:
         if self.offset is None or not busy:
             self.offset = min(d for _, d in self.samples)
 
+    def _fresh(self, events):
+        """The events not taken before, in order. An older one (a repeat in a later packet, or a packet that arrived
+        late) is dropped. Two events in the SAME millisecond are both kept when they differ, because a paddle letting
+        go as the other closes can do exactly that and neither is a repeat; only an identical (time, state) is."""
+        out, last, seen = [], self.last_t, set(self.seen_at_last)
+        if not events:
+            return out
+        for t_ms, state in sorted(events, key=lambda e: (e[0] - events[0][0]) & 0xFFFFFFFF):
+            state = bool(state)
+            if last is None or self._newer(t_ms, last):
+                out.append((t_ms, state))
+                last, seen = t_ms, {(t_ms, state)}
+            elif t_ms == last and (t_ms, state) not in seen:
+                out.append((t_ms, state))
+                seen.add((t_ms, state))
+        return out
+
     def feed(self, events, now=None, sent_ms=None):
         """Events are (milliseconds on the sender's clock, down?). Old ones (repeats) are dropped."""
         now = time.perf_counter() if now is None else now
@@ -230,14 +248,14 @@ class Engine:
             self.last_packet = now
             self.stats["packets"] += 1
             self._sample(now, sent_ms if sent_ms is not None else (events[-1][0] if events else None))
-            fresh = [e for e in events if self.last_t is None or self._newer(e[0], self.last_t)]
+            fresh = self._fresh(events)
             self.stats["duplicates"] += len(events) - len(fresh)
             if not fresh:
                 return
             self._drop_source("text")                       # the operator's hand wins over a text message
             if self.line.state and self.held_by == "text":
                 self._force_up("key events arrived while text was being sent")
-            for t_ms, state in sorted(fresh, key=lambda e: (e[0] - fresh[0][0]) & 0xFFFFFFFF):
+            for t_ms, state in fresh:
                 sec = t_ms / 1000.0
                 play_at = sec + self.offset + self.buffer
                 if play_at < now:                           # it came too late for the buffer: play it now
@@ -247,6 +265,9 @@ class Engine:
                     play_at = now
                 heapq.heappush(self.queue, (play_at, next(self.counter), bool(state), "events"))
                 self.stats["events"] += 1
+                if t_ms != self.last_t:
+                    self.seen_at_last = set()
+                self.seen_at_last.add((t_ms, bool(state)))
                 self.last_t = t_ms
             self.last_activity = now
             self.cv.notify()

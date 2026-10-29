@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.4.3"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.4.4"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -2890,6 +2890,25 @@ class MidiSupport:
     command = None            # a test can replace this: a list, in which "{path}" stands for the result file
     result = None             # (ok, message, input ports, output ports) once it is known
     timeout = 20              # seconds the probe may take
+    STILL = "MIDI paddles are off; serial paddles, the test key and the text still work."
+
+    @classmethod
+    def advice(cls):
+        if sys.version_info >= (3, 14):
+            return (f"Python {sys.version_info.major}.{sys.version_info.minor} is very new and python-rtmidi may not "
+                    f"support it yet: try Python 3.12 or 3.13, or pip install --upgrade python-rtmidi. {cls.STILL}")
+        return f"Try pip install --upgrade --force-reinstall python-rtmidi. {cls.STILL}"
+
+    @classmethod
+    def explain(cls, returncode, stderr, doing="asked for the MIDI ports"):
+        """What to tell the user when the process that runs python-rtmidi ended badly."""
+        tail = (str(stderr or "").strip().splitlines() or ["no message"])[-1][:140]
+        crashed = returncode is None or returncode < 0 or "Fatal Python error" in str(stderr) or returncode > 128
+        if "No module named" in str(stderr) and "rtmidi" in str(stderr):
+            return f"python-rtmidi is not installed (pip install python-rtmidi). {cls.STILL}"
+        if crashed:                                    # the library killed its process
+            return f"python-rtmidi crashed when {doing} (code {returncode}: {tail}). {cls.advice()}"
+        return f"python-rtmidi could not start: {tail}. {cls.STILL}"
 
     @classmethod
     def check(cls, force=False):
@@ -2904,28 +2923,15 @@ class MidiSupport:
             cmd = [sys.executable, "--rtmidi-probe", path]
         else:
             cmd = [sys.executable, os.path.abspath(__file__), "--rtmidi-probe", path]
-        still = "MIDI paddles are off; serial paddles, the test key and the text still work."
-        if sys.version_info >= (3, 14):
-            advice = (f"Python {sys.version_info.major}.{sys.version_info.minor} is very new and python-rtmidi may not "
-                      f"support it yet: try Python 3.12 or 3.13, or pip install --upgrade python-rtmidi. {still}")
-        else:
-            advice = f"Try pip install --upgrade --force-reinstall python-rtmidi. {still}"
+        advice = cls.advice()
+        still = cls.STILL
         try:
             run = subprocess.run(cmd, capture_output=True, text=True, timeout=cls.timeout)
             data = json.loads(Path(path).read_text(encoding="utf-8") or "null") if run.returncode == 0 else None
             if data is not None:
                 cls.result = (True, "", list(data.get("in", [])), list(data.get("out", [])))
             else:
-                tail = (run.stderr.strip().splitlines() or ["no message"])[-1][:140]
-                crashed = run.returncode < 0 or "Fatal Python error" in run.stderr or run.returncode > 128
-                if "No module named" in run.stderr and "rtmidi" in run.stderr:
-                    message = f"python-rtmidi is not installed (pip install python-rtmidi). {still}"
-                elif crashed:                                   # the library killed its process: a bad build for this Python
-                    message = (f"python-rtmidi crashed when asked for the MIDI ports (code {run.returncode}: {tail}). "
-                               f"{advice}")
-                else:                                           # it ran and reported an error: say what it said
-                    message = f"python-rtmidi could not start: {tail}. {still}"
-                cls.result = (False, message, [], [])
+                cls.result = (False, cls.explain(run.returncode, run.stderr), [], [])
         except subprocess.TimeoutExpired:
             cls.result = (False, f"python-rtmidi did not answer within {cls.timeout} s. {advice}", [], [])
         except Exception as exc:
@@ -2945,6 +2951,274 @@ class MidiSupport:
 
 
 ALL_MIDI = "(all MIDI inputs)"      # for the Monitor: listen to every MIDI input at once
+
+
+class _FakeRtmidi:
+    """Stands in for python-rtmidi, ONLY when the environment variable FT991A_FAKE_RTMIDI is set. The tests use it to
+    try the helper without a MIDI system, to read what it sends to an output, and to make it crash on purpose."""
+
+    def __init__(self):
+        self.mode = os.environ.get("FT991A_FAKE_RTMIDI", "")
+        self.ports_in = json.loads(os.environ.get("FT991A_FAKE_PORTS_IN", '["Fake MIDI"]'))
+        self.ports_out = json.loads(os.environ.get("FT991A_FAKE_PORTS_OUT", '["Fake MIDI"]'))
+        self.log = os.environ.get("FT991A_FAKE_LOG")
+        self.callbacks = {}
+        outer = self
+
+        class MidiIn:
+            def __init__(self, *a, **k):
+                if outer.mode == "abort_on_construct":
+                    os.abort()
+
+            def get_ports(self):
+                return list(outer.ports_in)
+
+            def open_port(self, index):
+                if outer.mode == "abort_on_open":
+                    os.abort()
+                self.index = index
+
+            def set_callback(self, callback):
+                outer.callbacks[self.index] = callback
+
+            def cancel_callback(self):
+                outer.callbacks.pop(getattr(self, "index", None), None)
+
+            def close_port(self):
+                pass
+
+        class MidiOut:
+            def get_ports(self):
+                return list(outer.ports_out)
+
+            def open_port(self, index):
+                self.index = index
+
+            def send_message(self, message):
+                if outer.log:
+                    with open(outer.log, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({"out": self.index, "m": list(message)}) + "\n")
+
+            def close_port(self):
+                pass
+
+        self.MidiIn, self.MidiOut = MidiIn, MidiOut
+
+
+def midi_helper_main(port):
+    """The MIDI helper process (--midi-helper PORT). It is the ONLY place python-rtmidi is used. python-rtmidi is a native
+    library that can kill the process it runs in (on a Mac with Python 3.14 it did, in the middle of keying a
+    transmitter), so it runs here, and the panel talks to this process over a socket on this computer: commands
+    in (ports, open an input or an output, send), MIDI messages out, each stamped with the time it arrived on
+    perf_counter, which is the same clock in every process on a computer. If this process dies, the panel goes on."""
+    import socket
+    rtmidi = _FakeRtmidi() if os.environ.get("FT991A_FAKE_RTMIDI") else __import__("rtmidi")
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    sock.settimeout(None)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    lock = threading.Lock()
+
+    def emit(obj):
+        data = (json.dumps(obj) + "\n").encode("utf-8")
+        with lock:
+            sock.sendall(data)
+
+    def make_callback(label):
+        def callback(event, data=None):
+            message, delta = event
+            emit({"ev": "midi", "t": time.perf_counter(), "m": list(message), "d": delta, "port": label})
+        return callback
+
+    ins, out = [], None
+    for line in sock.makefile("r", encoding="utf-8", newline="\n"):
+        try:
+            cmd = json.loads(line)
+        except ValueError:
+            continue
+        kind = cmd.get("cmd")
+        try:
+            if kind == "ports":
+                emit({"ev": "ports", "in": rtmidi.MidiIn().get_ports(), "out": rtmidi.MidiOut().get_ports()})
+            elif kind == "open_in":
+                names, want = rtmidi.MidiIn().get_ports(), cmd.get("port", "")
+                chosen = list(range(len(names))) if want == ALL_MIDI else \
+                    [i for i, n in enumerate(names) if n == want or (want and want in n)][:1]
+                if not chosen:
+                    emit({"ev": "error", "cmd": kind, "msg": f"MIDI port '{want}' not found; there are {names or 'none'}"})
+                    continue
+                for i in chosen:
+                    midiin = rtmidi.MidiIn()
+                    midiin.open_port(i)
+                    midiin.set_callback(make_callback(names[i] if len(chosen) > 1 else None))
+                    ins.append(midiin)
+                emit({"ev": "opened_in", "ports": [names[i] for i in chosen]})
+            elif kind == "open_out":
+                midiout = rtmidi.MidiOut()
+                names, devname = midiout.get_ports(), cmd.get("port", "")
+                best, best_len = None, 0
+                for index, name in enumerate(names):          # the output whose name best matches the input's
+                    for length in range(len(devname), 0, -1):
+                        if name.startswith(devname[:length]):
+                            if length > best_len:
+                                best, best_len = index, length
+                            break
+                if best is None:
+                    emit({"ev": "error", "cmd": kind, "msg": f"no MIDI output port matches '{devname}' (there are {names or 'none'})"})
+                    continue
+                midiout.open_port(best)
+                out = midiout
+                emit({"ev": "opened_out", "port": names[best]})
+            elif kind == "send":
+                if out is not None:
+                    out.send_message(cmd["m"])
+            elif kind == "fake_emit" and os.environ.get("FT991A_FAKE_RTMIDI"):
+                for index, callback in list(rtmidi.callbacks.items()):
+                    if cmd.get("input") in (None, index):
+                        for ev in cmd["events"]:
+                            callback((ev["m"], ev.get("d", 0.0)), None)
+                emit({"ev": "emitted"})
+            elif kind == "fake_abort" and os.environ.get("FT991A_FAKE_RTMIDI"):
+                os.abort()                                    # tests: the helper dies while a port is open
+            elif kind == "close":
+                break
+        except Exception as exc:
+            emit({"ev": "error", "cmd": kind, "msg": f"{type(exc).__name__}: {exc}"})
+    for midiin in ins:
+        try:
+            midiin.cancel_callback()
+            midiin.close_port()
+        except Exception:
+            pass
+    if out is not None:
+        try:
+            out.close_port()
+        except Exception:
+            pass
+    return 0
+
+
+class MidiHelper:
+    """The panel's end of the MIDI helper process (see midi_helper_main). It starts the helper, which connects back over a
+    socket on this computer, and gives requests with answers (ports, open an input or an output), fire-and-forget
+    sends, and MIDI messages handed to on_midi(arrived, message, delta, port) on a reader thread. If the helper dies
+    (python-rtmidi crashing), on_lost(code, message) is called, and the panel carries on without MIDI."""
+
+    def __init__(self, on_midi=None, on_lost=None, env=None):
+        import subprocess
+        self.on_midi, self.on_lost = on_midi, on_lost
+        self.replies = queue.Queue()
+        self.closing = False
+        self.lost = None
+        self._errfile = tempfile.TemporaryFile()
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        server.settimeout(0.2)
+        port = server.getsockname()[1]
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--midi-helper", str(port)]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--midi-helper", str(port)]
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self._errfile,
+                                     env=env if env is not None else os.environ.copy())
+        self.conn = None
+        deadline = time.time() + 15
+        while time.time() < deadline and self.conn is None:
+            try:
+                self.conn, _addr = server.accept()
+            except socket.timeout:
+                if self.proc.poll() is not None:
+                    break
+        server.close()
+        if self.conn is None:
+            rc = self.proc.poll()
+            if rc is None:
+                self.proc.kill()
+            raise RuntimeError(MidiSupport.explain(rc, self._stderr(), "starting"))
+        self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.conn.settimeout(None)
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _stderr(self):
+        try:
+            self._errfile.flush()
+            self._errfile.seek(0)
+            return self._errfile.read().decode("utf-8", "replace")
+        except Exception:
+            return ""
+
+    def _read(self):
+        try:
+            for line in self.conn.makefile("r", encoding="utf-8", newline="\n"):
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if msg.get("ev") == "midi":
+                    if self.on_midi:
+                        try:
+                            self.on_midi(msg["t"], msg["m"], msg["d"], msg.get("port"))
+                        except Exception:
+                            pass                              # a handler must never be able to stop the reader
+                else:
+                    self.replies.put(msg)
+        except (OSError, ValueError):
+            pass
+        try:
+            rc = self.proc.wait(timeout=3)
+        except Exception:
+            rc = None
+        self.lost = (rc, self._stderr())
+        self.replies.put({"ev": "lost"})
+        if not self.closing and self.on_lost:
+            try:
+                self.on_lost(rc, MidiSupport.explain(rc, self.lost[1], "running"))
+            except Exception:
+                pass
+
+    def send(self, cmd):
+        try:
+            self.conn.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
+            return True
+        except OSError:
+            return False
+
+    def request(self, cmd, expect, timeout=10.0):
+        """Send a command and wait for its answer (the event named expect). An error from the helper, or its death,
+        is a RuntimeError with the reason."""
+        if not self.send(cmd):
+            raise RuntimeError(MidiSupport.explain(self.proc.poll(), self._stderr(), "running"))
+        end = time.time() + timeout
+        while True:
+            try:
+                msg = self.replies.get(timeout=max(0.05, end - time.time()))
+            except queue.Empty:
+                raise RuntimeError(f"the MIDI helper did not answer within {timeout:g} s")
+            if msg.get("ev") == expect:
+                return msg
+            if msg.get("ev") == "error":
+                raise RuntimeError(msg.get("msg", "the MIDI helper reported an error"))
+            if msg.get("ev") == "lost":
+                raise RuntimeError(MidiSupport.explain(self.lost[0], self.lost[1], "running"))
+            if time.time() >= end:
+                raise RuntimeError(f"the MIDI helper did not answer within {timeout:g} s")
+
+    def close(self):
+        self.closing = True
+        self.send({"cmd": "close"})
+        try:
+            self.proc.wait(timeout=2)
+        except Exception:
+            self.proc.kill()
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        try:
+            self._errfile.close()
+        except Exception:
+            pass
 
 
 def open_serial_input(device, drive_dtr=False, drive_rts=False):
@@ -2971,30 +3245,19 @@ class VailAdapterOut:
              "Ultimatic", "Plain Iambic", "Iambic A", "Iambic B", "Keyahead")
 
     def __init__(self):
-        self.midiout = None
+        self.helper = None
+        self.port = None
         self.sent = []
 
-    def open(self, devname):
-        MidiSupport.require()
-        import rtmidi
-        out = rtmidi.MidiOut()
-        names = out.get_ports()
-        best, best_len = None, 0
-        for index, name in enumerate(names):                  # the output port whose name best matches the input's
-            for length in range(len(devname), 0, -1):
-                if name.startswith(devname[:length]):
-                    if length > best_len:
-                        best, best_len = index, length
-                    break
-        if best is None:
-            raise RuntimeError(f"no MIDI output port matches '{devname}' (there are {names or 'none'})")
-        out.open_port(best)
-        self.midiout = out
+    def open(self, devname, helper):
+        """Open the output port whose name best matches devname, in the MIDI helper process."""
+        reply = helper.request({"cmd": "open_out", "port": devname}, "opened_out")
+        self.helper, self.port = helper, reply.get("port")
 
     def send(self, message):
         self.sent.append(list(message))
-        if self.midiout is not None:
-            self.midiout.send_message(message)
+        if self.helper is not None:
+            self.helper.send({"cmd": "send", "m": list(message)})
 
     def set_speed(self, wpm):
         self.send([0xB0, 1, max(1, min(127, round(1200 / max(4, int(wpm)) / 2)))])
@@ -3007,12 +3270,7 @@ class VailAdapterOut:
         self.send([0xC0, self.MODES.index(mode) if mode in self.MODES else 0])
 
     def close(self):
-        if self.midiout is not None:
-            try:
-                self.midiout.close_port()
-            except Exception:
-                pass
-            self.midiout = None
+        self.helper = None                                   # the helper closes the port when it is closed
 
 
 class DeviceMonitor:
@@ -3036,8 +3294,7 @@ class DeviceMonitor:
 
     def __init__(self, report):
         self.report = report
-        self.midiin = self.vail = self.port = None
-        self.midiins = []                      # every MIDI input being listened to
+        self.helper = self.vail = self.port = None      # the MIDI helper process, a Vail adapter's output, a serial port
         self._stop = threading.Event()
         self.thread = None
         self.last = time.perf_counter()
@@ -3047,43 +3304,34 @@ class DeviceMonitor:
         self.lines_seen = []
 
     def start_midi(self, port_name, vail=False, wpm=20, pitch=600):
-        MidiSupport.require()
-        import rtmidi
-        probe = rtmidi.MidiIn()
-        names = probe.get_ports()
-        try:
-            outs = rtmidi.MidiOut().get_ports()
-        except Exception:
-            outs = []
+        """Listen to a MIDI input (or every input: ALL_MIDI), in a helper process of its own."""
+        self.helper = MidiHelper(self._from_helper, self._lost)
+        ports = self.helper.request({"cmd": "ports"}, "ports")
+        names, outs = ports["in"], ports["out"]
         self.report(f"Monitor: MIDI input ports found: {names or 'NONE'}; output ports: {outs or 'none'}")
-        if port_name == ALL_MIDI:
-            chosen = list(range(len(names)))
-        else:
-            chosen = [i for i, n in enumerate(names) if n == port_name or (port_name and port_name in n)][:1]
-        if not chosen:
-            raise RuntimeError(f"MIDI port '{port_name}' not found; there are {names or 'none'}")
-        for i in chosen:
-            midiin = rtmidi.MidiIn()
-            midiin.open_port(i)
-            midiin.set_callback(lambda event, data=None, label=names[i]: self._midi(event, label if len(chosen) > 1 else None))
-            self.midiins.append(midiin)
-        self.midiin = self.midiins[0]
-        self.report("Monitor: listening to " + (", ".join(f"'{names[i]}'" for i in chosen)) +
+        opened = self.helper.request({"cmd": "open_in", "port": port_name}, "opened_in")["ports"]
+        self.report("Monitor: listening to " + ", ".join(f"'{n}'" for n in opened) +
                     ". Press the key or paddles; nothing is keyed.")
         if vail:
-            for i in chosen:
-                if len(chosen) > 1 and "vail" not in names[i].lower():
+            for name in opened:
+                if len(opened) > 1 and "vail" not in name.lower():
                     continue
                 try:
                     self.vail = VailAdapterOut()
-                    self.vail.open(names[i])
+                    self.vail.open(name, self.helper)
                     self.vail.set_state(wpm, pitch)
-                    self.report(f"Monitor: told '{names[i]}' to use MIDI mode (passthrough). If nothing arrives, unplug the "
-                                f"adapter, plug it in again, and start the Monitor again.")
+                    self.report(f"Monitor: told '{self.vail.port}' to use MIDI mode (passthrough). If nothing arrives, unplug "
+                                f"the adapter, plug it in again, and start the Monitor again.")
                     break
                 except Exception as exc:
                     self.vail = None
-                    self.report(f"Monitor: could not set up '{names[i]}' ({exc}). It may be sending keystrokes, not MIDI.")
+                    self.report(f"Monitor: could not set up '{name}' ({exc}). It may be sending keystrokes, not MIDI.")
+
+    def _from_helper(self, arrived, message, delta, label):
+        self._midi((message, delta), label)
+
+    def _lost(self, code, message):
+        self.report(f"Monitor: {message}")
 
     def _midi(self, event, label=None):
         message, delta = event
@@ -3129,21 +3377,16 @@ class DeviceMonitor:
         self._stop.set()
         if self.thread is not None:
             self.thread.join(timeout=0.5)
-        for midiin in self.midiins:
-            try:
-                midiin.cancel_callback()
-                midiin.close_port()
-            except Exception:
-                pass
-        self.midiins = []
         if self.vail is not None:
             self.vail.close()
+        if self.helper is not None:
+            self.helper.close()
         if self.port is not None and getattr(self, "_owned", False):
             try:
                 self.port.close()
             except Exception:
                 pass
-        self.midiin = self.vail = self.port = self.thread = None
+        self.helper = self.vail = self.port = self.thread = None
 
 
 class MidiPaddles:
@@ -3153,10 +3396,12 @@ class MidiPaddles:
     (value x 126 ms). The device's clock is rebuilt from those, and set on perf_counter by the least that any
     message has lately arrived behind it, so that a stalled computer does not distort the keying."""
     REANCHOR = 1.0
+    SETTLE = 0.5      # seconds after opening in which everything is ignored: some devices replay old events when connected
 
-    def __init__(self, keyer, dit_notes, dah_notes):
+    def __init__(self, keyer, dit_notes, dah_notes, helper=None, on_lost=None):
         self.keyer, self.dit_notes, self.dah_notes = keyer, list(dit_notes), list(dah_notes)
-        self.midiin = None
+        self.helper, self._own_helper, self.on_lost = helper, helper is None, on_lost
+        self.opened_at = 0.0
         self._hinted = 0.0
         self.delta = 0.0
         self.last_midi_delta = 0.0
@@ -3169,25 +3414,34 @@ class MidiPaddles:
         return ports if ok else []
 
     def open(self, port_name):
-        MidiSupport.require()
-        import rtmidi
-        self.midiin = rtmidi.MidiIn()
-        names = self.midiin.get_ports()
-        match = [i for i, n in enumerate(names) if n == port_name or (port_name and port_name in n)]
-        if not match:
-            raise RuntimeError(f"MIDI port '{port_name}' not found; there are {names or 'none'}")
-        self.midiin.open_port(match[0])
-        self.midiin.set_callback(self._callback)
+        """Open the MIDI input in a helper process (python-rtmidi never runs inside the panel)."""
+        self.opened_at = time.perf_counter()
+        if self.helper is None:
+            self.helper = MidiHelper(self._from_helper, self._lost)
+        else:
+            self.helper.on_midi, self.helper.on_lost = self._from_helper, self._lost
+        self.helper.request({"cmd": "open_in", "port": port_name}, "opened_in")
 
-    def _callback(self, event, data=None):
+    def _from_helper(self, arrived, message, delta, label=None):
         try:
-            self.handle(*event)
-        except Exception as exc:                             # never let the MIDI thread die
-            self.keyer.log(f"keyer: a MIDI message failed: {type(exc).__name__}: {exc}")
+            self.handle(message, delta, arrived)
+        except Exception as exc:                             # never let the reader die
+            say = getattr(self.keyer, "log", None)
+            if say:
+                say(f"keyer: a MIDI message failed: {type(exc).__name__}: {exc}")
 
-    def device_timestamp(self, delta):
+    def _lost(self, code, message):
+        """The helper died: let go of everything, and say so. (This runs on the helper's reader thread.)"""
+        self.keyer.release()
+        say = getattr(self.keyer, "log", None)
+        if say:
+            say(f"keyer: {message} Disarm and arm again to start it again.")
+        if self.on_lost:
+            self.on_lost(message)
+
+    def device_timestamp(self, delta, arrived=None):
         """When a message happened, on perf_counter, by the device's own count rather than when it arrived."""
-        arrived = time.perf_counter()
+        arrived = time.perf_counter() if arrived is None else arrived
         self.device_clock += delta
         offset = arrived - self.device_clock
         if (self.clock_offset is None or delta >= self.REANCHOR or offset - self.clock_offset >= self.REANCHOR):
@@ -3196,7 +3450,10 @@ class MidiPaddles:
             self.clock_offset = min(self.clock_offset, offset)
         return self.device_clock + self.clock_offset
 
-    def handle(self, message, midi_delta):
+    def handle(self, message, midi_delta, arrived=None):
+        """arrived: when the helper received it (perf_counter), if known."""
+        if arrived is not None and arrived < self.opened_at + self.SETTLE:
+            return                                           # an old event replayed when the port was opened
         status, note, velocity = (list(message) + [0, 0, 0])[:3]
         if midi_delta >= 0.001:
             self.last_midi_delta = midi_delta
@@ -3207,7 +3464,7 @@ class MidiPaddles:
             self.delta = midi_delta
         else:
             self.delta += velocity / 1000
-        timestamp = self.device_timestamp(self.delta) if status in (0x90, 0x80) else None
+        timestamp = self.device_timestamp(self.delta, arrived) if status in (0x90, 0x80) else None
         keyer = self.keyer
         if status in (0x90, 0x80) and note not in self.dit_notes and note not in self.dah_notes:
             if time.perf_counter() - self._hinted > 3.0:       # say it, not too often: it is the commonest reason for no keying
@@ -3233,13 +3490,9 @@ class MidiPaddles:
         self.delta = 0.0
 
     def close(self):
-        if self.midiin is not None:
-            try:
-                self.midiin.cancel_callback()
-                self.midiin.close_port()
-            except Exception:
-                pass
-            self.midiin = None
+        if self.helper is not None and self._own_helper:
+            self.helper.close()
+        self.helper = None
         self.keyer.release()
 
 
@@ -3700,7 +3953,8 @@ class CwKeyboard:
         try:
             if kind["midi"]:
                 split = lambda text: [int(x) for x in re.split(r"[,\s]+", text.strip()) if x]
-                self.source = MidiPaddles(k, split(self.dit_var.get()), [] if kind["straight"] else split(self.dah_var.get()))
+                self.source = MidiPaddles(k, split(self.dit_var.get()), [] if kind["straight"] else split(self.dah_var.get()),
+                                          on_lost=self._midi_lost)
                 self.source.open(self.dev_port.get().strip())
             else:
                 self.source = SerialPaddles(k, self.dev_port.get().strip(), self.dit_var.get().strip() or "DSR",
@@ -3716,7 +3970,7 @@ class CwKeyboard:
                 (self.kmode.get() if self.kmode.get() in VailAdapterOut.MODES else "Iambic B")
             try:
                 self.vail = VailAdapterOut()
-                self.vail.open(self.dev_port.get().strip())
+                self.vail.open(self.dev_port.get().strip(), self.source.helper)
                 self.vail.set_state(wpm, self.sidetone.pitch, mode)
                 self.panel.append_log(f"CW key: the Vail adapter was told to use MIDI mode, {mode}, {wpm} wpm")
             except Exception as exc:
@@ -3744,6 +3998,11 @@ class CwKeyboard:
             self.vail = None
         self.keyer.abort()                                # releases, clears what is already scheduled in the daemon
         self.sidetone.stop()
+
+    def _midi_lost(self, message):
+        """The MIDI helper process died (this runs on its reader thread: no Tk here)."""
+        self.pending_status = message
+        self.panel.logq.put("CW key: " + message)
 
     def _refused_from_thread(self, why):
         """A paddle was refused (this runs on the paddle's thread: no Tk here)."""
@@ -7105,7 +7364,12 @@ def run_selftest(path):
         found = []
         for module, what in (("serial", "pyserial (serial paddles)"), ("rtmidi", "python-rtmidi (MIDI paddles)")):
             try:
-                __import__(module)
+                if module == "rtmidi":                       # is it there? (it is only ever loaded in the MIDI helper process)
+                    import importlib.util
+                    if importlib.util.find_spec("rtmidi") is None:
+                        raise ImportError("No module named 'rtmidi'")
+                else:
+                    __import__(module)
                 found.append(what)
             except Exception as exc:
                 need(not getattr(sys, "frozen", False), f"{what} is not inside the packaged program: {exc}")
@@ -7130,12 +7394,15 @@ def main():
                     help="show the licence (GNU GPL version 3 or later) and exit; 'full' prints the whole "
                          "GPL, 'credits' the notices, 'third-party' the licences of the included software")
     ap.add_argument("--rtmidi-probe", metavar="FILE", help=argparse.SUPPRESS)      # used by the panel itself
+    ap.add_argument("--midi-helper", metavar="PORT", help=argparse.SUPPRESS)       # the MIDI helper process
     ap.add_argument("--save-license", metavar="FOLDER",
                     help="copy the licence files (LICENSE, NOTICE.md, THIRD-PARTY-LICENSES.txt) into FOLDER and exit")
     ap.add_argument("--selftest", metavar="FILE",
                     help="check that Tk, the sound library and Opus are present, write the "
                          "report to FILE and exit (used by the installer builds)")
     args = ap.parse_args()
+    if args.midi_helper:
+        return midi_helper_main(int(args.midi_helper))
     if args.rtmidi_probe:
         return rtmidi_probe(args.rtmidi_probe)
     if args.license:
