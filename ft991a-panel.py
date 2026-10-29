@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.4.4"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.5.0"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -1190,6 +1190,9 @@ class Radio:
     def zero_in(self):                          # nor to CW zero-in (the CW window)
         pass
 
+    def expect_tx(self, seconds):               # nor to the faster meter polling while keying
+        pass
+
     def send(self, cmd, lines=1, timeout=REPLY_TIMEOUT):
         """Queue a command typed by the user (set commands reply with one RPRT line)."""
         self.userq.put((cmd, lines, timeout))
@@ -1427,6 +1430,7 @@ class CatRadio:
         self.due = {}
         self.power_job = None       # (when due, command): the PS command that follows dummy data
         self.quiet_until = 0.0      # nothing else is sent on the line until then
+        self.tx_hint_until = 0.0    # the panel is keying until then: poll the transmit meters without waiting for TX;
         self.state = self._blank()
         self.menu_vals, self.menu_t = {}, {}    # menu number -> raw value, and when it arrived
         self.fn_vals, self.fn_t = {}, {}        # function (command + selector) -> value, and when
@@ -1474,6 +1478,11 @@ class CatRadio:
 
     def zero_in(self):
         self.send("ZI;")                          # CW auto zero-in: the radio tunes itself to the signal it hears
+
+    def expect_tx(self, seconds):
+        """The panel is keying (a key, paddles, text): for the next few seconds poll the TX meters, and TX, much faster.
+        Elements can be 50 ms long, and learning of them from a TX; poll every half second showed the meters only now and then."""
+        self.tx_hint_until = max(self.tx_hint_until, time.monotonic() + seconds)
 
     # actions used by the panel (Radio has the same ones)
     def set_mode(self, ham):
@@ -1624,12 +1633,16 @@ class CatRadio:
             return item
         with self.lock:
             tx_on = bool(self.state["ptt"])
+        hinted = now < self.tx_hint_until                   # the panel itself is keying: do not wait for TX; to say so
+        tx_on = tx_on or hinted
         best = None
         for cmd, every, tx_only in self.PLAN:
             if tx_only and not tx_on:
                 continue
             if cmd in self.RX_ONLY and tx_on:
                 continue
+            if hinted and (tx_only or cmd == "TX;"):
+                every = min(every, 0.3 if cmd == "TX;" else 0.2)    # about 15 commands a second at most
             due = self.due.get(cmd, 0.0)
             if due <= now and (best is None or due < best[0]):
                 best = (due, cmd, every)
@@ -2490,6 +2503,41 @@ class CwDaemonLink:
 
 KEYD_PORT = 6790
 
+CW_MORSE = {
+    "A": ".-", "B": "-...", "C": "-.-.", "D": "-..", "E": ".", "F": "..-.", "G": "--.", "H": "....",
+    "I": "..", "J": ".---", "K": "-.-", "L": ".-..", "M": "--", "N": "-.", "O": "---", "P": ".--.",
+    "Q": "--.-", "R": ".-.", "S": "...", "T": "-", "U": "..-", "V": "...-", "W": ".--", "X": "-..-",
+    "Y": "-.--", "Z": "--..",
+    "0": "-----", "1": ".----", "2": "..---", "3": "...--", "4": "....-", "5": ".....",
+    "6": "-....", "7": "--...", "8": "---..", "9": "----.",
+    ".": ".-.-.-", ",": "--..--", "?": "..--..", "/": "-..-.", ":": "---...", ";": "-.-.-.",
+    "'": ".----.", '"': ".-..-.", "@": ".--.-.", ")": "-.--.-",
+    "=": "-...-", "*": ".-.-.", "<": "...-.-", "(": "-.--.", "!": "...-.", "&": ".-...", ">": "-...-.-",
+}
+
+
+def cw_morse_events(text, wpm):
+    """Text as (seconds from the start, key down?) events, and the total time: the Morse timing that the keying daemon
+    and cwdaemon use (a dot is 1.2/wpm seconds, a dash three dots, a gap in a letter one, between letters three, between
+    words seven). It lets the panel sound what the daemon is sending."""
+    dot = 1.2 / max(4, wpm)
+    t, events, first = 0.0, [], True
+    for word in text.upper().split():
+        if not first:
+            t += 4 * dot
+        first = False
+        for ch in word:
+            pattern = CW_MORSE.get(ch)
+            if not pattern:
+                continue
+            for el in pattern:
+                events.append((t, True))
+                t += dot if el == "." else 3 * dot
+                events.append((t, False))
+                t += dot
+            t += 2 * dot
+    return events, t
+
 
 class KeyEventSender:
     """Sends key-down and key-up to keying-daemon.py, which runs on the radio's computer and keys the radio
@@ -2538,6 +2586,10 @@ class KeyEventSender:
             self.sock.sendto(data, self.target)
         except OSError:
             pass                                         # no route yet: the next ping will try again
+
+    def recently(self, seconds):
+        """Is the key down, or was it moved within the last `seconds`?"""
+        return self.down or time.perf_counter() - self.last_edge < seconds
 
     def active(self):
         """Is the key down, or was it moved lately (the radio may still be transmitting)?"""
@@ -3302,6 +3354,8 @@ class DeviceMonitor:
         self.count = 0                         # messages or line changes seen
         self.notes_seen = []                   # MIDI notes, in the order they first came on
         self.lines_seen = []
+        self.groups = []                       # serial lines that closed, grouped: lines that change together are ONE paddle
+        self.group_t = 0.0
 
     def start_midi(self, port_name, vail=False, wpm=20, pitch=600):
         """Listen to a MIDI input (or every input: ALL_MIDI), in a helper process of its own."""
@@ -3314,8 +3368,8 @@ class DeviceMonitor:
                     ". Press the key or paddles; nothing is keyed.")
         if vail:
             for name in opened:
-                if len(opened) > 1 and "vail" not in name.lower():
-                    continue
+                if len(opened) > 1 and not any(w in name.lower() for w in ("vail", "qt py")):   # a Vail adapter's port is
+                    continue                                                                     # named after its board: "QT Py M0"
                 try:
                     self.vail = VailAdapterOut()
                     self.vail.open(name, self.helper)
@@ -3345,6 +3399,7 @@ class DeviceMonitor:
         self._owned = not hasattr(device, "dsr")
         self.port = open_serial_input(device, drive_dtr, drive_rts) if self._owned else device
         self.lines_seen = []                                  # the lines that closed, in the order they first did
+        self.groups = []
         first = self._lines()
         self.report("Monitor: serial lines at rest: " + ", ".join(f"{k} {'ON' if v else 'off'}" for k, v in first.items())
                     + ". Press the key or paddles; each change is reported. A key is closed when its line differs from this.")
@@ -3369,6 +3424,12 @@ class DeviceMonitor:
                     self.count += 1
                     if name not in self.lines_seen:
                         self.lines_seen.append(name)
+                        if self.groups and t - self.group_t <= 0.005:     # within 5 ms of the last: the same paddle
+                            self.groups[-1].append(name)
+                            self.report(f"Monitor: {' and '.join(self.groups[-1])} change together: they are one paddle.")
+                        else:
+                            self.groups.append([name])
+                        self.group_t = t
                     self.report(f"Serial: {name} {'ON' if value else 'off'}   (+{(t - self.last) * 1000:.0f} ms)")
                     self.last, self.state[name] = t, value
             time.sleep(0.001)
@@ -3598,6 +3659,12 @@ class CwKeyboard:
         self.drive_dtr = tk.BooleanVar(value=bool(c.get("kdtr", False)))     # serial: drive DTR / RTS (off: opening a
         self.drive_rts = tk.BooleanVar(value=bool(c.get("krts", False)))     # port must never key anything)
         self.hinted_silence = False
+        self._tone_gen = 0                    # counts text sidetones: a new one or an Abort stops the one playing
+        self.mute_radio = tk.BooleanVar(value=bool(c.get("kmute", False)))   # silence the radio's own sidetone while armed
+        self.saved_ml = None                  # the radio's monitor level before it was set to 0
+        self.mute_wanted = False
+        self._armed_with = None               # the settings the open device was opened with
+        self.keyer_desc = ""
         self.source = None
         self.vail = None                      # the Vail adapter's MIDI output, while one is armed
         self.monitor = None                   # a DeviceMonitor, while one is running
@@ -3679,7 +3746,7 @@ class CwKeyboard:
         ttk.Combobox(kfr, textvariable=self.kmode, values=KEYER_MODES, state="readonly", width=10).grid(row=3, column=1, sticky="w", pady=1)
         ttk.Label(kfr, text="Dit memory %").grid(row=3, column=2, sticky="e", padx=(8, 3))
         ttk.Entry(kfr, textvariable=self.kmem, width=5).grid(row=3, column=3, sticky="w")
-        ttk.Checkbutton(kfr, text="Sidetone", variable=self.tone_on).grid(row=4, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(kfr, text="Sidetone", variable=self.tone_on, command=self.restart_if_armed).grid(row=4, column=0, columnspan=2, sticky="w")
         ttk.Label(kfr, text="Pitch Hz").grid(row=4, column=2, sticky="e", padx=(8, 3))
         ttk.Entry(kfr, textvariable=self.pitch, width=5).grid(row=4, column=3, sticky="w")
         ttk.Button(kfr, text="Test tone", style="Compact.TButton", command=self.on_tone).grid(row=4, column=4, padx=(4, 0))
@@ -3690,14 +3757,22 @@ class CwKeyboard:
         ttk.Label(kfr, foreground="#666666", wraplength=400, justify="left",
                   text="Monitor keys nothing: press dit, then dah, then Use what was seen.").grid(
             row=6, column=0, columnspan=5, sticky="w", pady=(2, 0))
-        ttk.Checkbutton(kfr, text="Drive DTR", variable=self.drive_dtr).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(kfr, text="Drive RTS", variable=self.drive_rts).grid(row=7, column=2, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(kfr, text="Drive DTR", variable=self.drive_dtr, command=self.restart_if_armed).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(kfr, text="Drive RTS", variable=self.drive_rts, command=self.restart_if_armed).grid(row=7, column=2, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(kfr, text="Mute radio tone", variable=self.mute_radio, command=self.restart_if_armed).grid(row=7, column=4, sticky="w", pady=(4, 0))
         ttk.Label(kfr, foreground="#666666", wraplength=400, justify="left",
-                  text="Serial only. Off unless the interface needs them for power: they can key a transmitter.").grid(
+                  text="DTR and RTS (serial) stay off unless the interface needs them for power: they can key a transmitter. "
+                       "Mute radio tone sets the radio's monitor level to 0 while armed, and puts it back.").grid(
             row=8, column=0, columnspan=5, sticky="w")
         for w in (self.dev_cb, self.port_cb):
             for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 w.bind(seq, lambda e: "break")
+        for w in kfr.winfo_children():                        # a change takes effect at once while armed
+            if isinstance(w, (ttk.Entry, ttk.Combobox)):
+                w.bind("<Return>", self.restart_if_armed, add="+")
+                w.bind("<FocusOut>", self.restart_if_armed, add="+")
+            if isinstance(w, ttk.Combobox) and w is not self.dev_cb:
+                w.bind("<<ComboboxSelected>>", self.restart_if_armed, add="+")
         ttk.Label(box, textvariable=self.status, foreground="#333333", wraplength=380,
                   justify="left").grid(row=11, column=0, columnspan=5, sticky="w", pady=(4, 0))
         ttk.Label(box, foreground="#666666", wraplength=380, justify="left", text=(
@@ -3719,7 +3794,7 @@ class CwKeyboard:
                     keyd_token=self.sender.token, kdev=self.dev_type.get(), kport=self.dev_port.get(),
                     kdit=self.dit_var.get(), kdah=self.dah_var.get(), kmode=self.kmode.get(),
                     kmem=self.kmem.get(), tone_on=self.tone_on.get(), pitch=self.pitch.get(),
-                    kdtr=self.drive_dtr.get(), krts=self.drive_rts.get())
+                    kdtr=self.drive_dtr.get(), krts=self.drive_rts.get(), kmute=self.mute_radio.get())
 
     def on_speed(self):
         self.speed_lbl.configure(text=f"{int(round(self.wpm.get()))} wpm")
@@ -3810,6 +3885,7 @@ class CwKeyboard:
         wpm = int(round(self.wpm.get()))
         target = self.target()
         self.link.message(target, text, wpm)
+        self.play_text_tone(text, wpm)
         self.status.set(f"Sending at {wpm} wpm: {text}")
         self.panel.append_log(f"CW keyboard: sending at {wpm} wpm via {target[0]}:{target[1]}: {text}")
 
@@ -3833,7 +3909,13 @@ class CwKeyboard:
     def on_device_changed(self, event=None, defaults=True, refresh=True):
         if getattr(self, "monitor", None) is not None:
             self.stop_monitor()
+        if event is not None and getattr(self, "armed_var", None) is not None and self.armed_var.get():
+            self.panel.root.after_idle(self.restart_if_armed)            # after the defaults for the new device are in
         kind = self.device_kind()
+        port_kind = "midi" if kind["midi"] else "serial" if kind["serial"] else ""
+        if event is not None and port_kind != getattr(self, "_port_kind", port_kind):
+            self.dev_port.set("")                           # a MIDI port name means nothing to a serial device, and the reverse
+        self._port_kind = port_kind
         if defaults and self.dev_type.get() in self.DEVICE_DEFAULTS:
             self.dit_var.set(self.DEVICE_DEFAULTS[self.dev_type.get()][0])
             self.dah_var.set(self.DEVICE_DEFAULTS[self.dev_type.get()][1])
@@ -3854,7 +3936,7 @@ class CwKeyboard:
         if kind["midi"] and ports:
             ports = list(ports) + [ALL_MIDI]
         self.port_cb.configure(values=ports)
-        if ports and self.dev_port.get() not in ports and not any(self.dev_port.get() and self.dev_port.get() in x for x in ports):
+        if ports and not self.dev_port.get().strip():        # only fill in an EMPTY port: never swap one you chose
             self.dev_port.set(ports[0])
 
     def _report_from_thread(self, text):
@@ -3893,7 +3975,8 @@ class CwKeyboard:
         if m is None:
             return self.refuse("start the Monitor first, press the dit paddle, then the dah paddle", "Nothing to use")
         kind = self.device_kind()
-        seen = [str(x) for x in (m.notes_seen if kind["midi"] else m.lines_seen)]
+        together = [g for g in m.groups if len(g) > 1] if not kind["midi"] else []
+        seen = [str(x) for x in (m.notes_seen if kind["midi"] else [g[0] for g in m.groups])]   # one entry per paddle
         if not seen:
             return self.refuse("nothing has been seen yet: press the key or paddles", "Nothing to use")
         self.dit_var.set(seen[0])
@@ -3903,6 +3986,8 @@ class CwKeyboard:
             self.dah_var.set(seen[1])
         what = "key" if kind["straight"] else "dit"
         text = f"{what} = {seen[0]}" + (f", dah = {seen[1]}" if len(seen) > 1 and not kind["straight"] else "")
+        if together:
+            text += " (" + "; ".join(f"{' and '.join(g)} move together: one paddle, {g[0]} used" for g in together) + ")"
         self.status.set(f"Set from what was seen: {text}.")
         self.panel.append_log(f"CW key: set from what the Monitor saw: {text} (seen in order: {', '.join(seen)})")
 
@@ -3925,12 +4010,70 @@ class CwKeyboard:
             self.monitor = None
         self.mon_btn.configure(text="Monitor")
 
+    def radio_tone_mute(self):
+        """Silence the radio's own CW sidetone by setting its monitor level (ML1) to 0 while armed. The Yaesu manuals
+        say the sidetone follows that level. It is put back by _unmute when you disarm. Unverified on every radio."""
+        radio = self.panel.radio
+        if self.saved_ml is not None:
+            return                                         # already muted
+        if radio.units != "raw" or not radio.connected:
+            self._midi_lost("The radio's sidetone can only be muted over the Raw CAT connection.")
+            return
+        threading.Thread(target=self._mute_worker, daemon=True).start()
+
+    def _mute_worker(self):
+        radio = self.panel.radio
+        t0 = time.monotonic()
+        radio.read_functions(["ML1;"])
+        value = None
+        while time.monotonic() < t0 + 3.0 and self.mute_wanted:
+            vals, times = radio.fn_snapshot()
+            if "ML1" in vals and times.get("ML1", 0) >= t0:
+                value = vals["ML1"]
+                break
+            time.sleep(0.05)
+        if not self.mute_wanted:
+            return
+        if value is None:
+            self._report_from_thread("The radio did not say what its monitor level is, so its own sidetone was left as it is.")
+            return
+        self.saved_ml = value
+        radio.write_function("ML1000;", "ML1;")
+        time.sleep(0.7)
+        now_value = radio.fn_snapshot()[0].get("ML1")
+        if now_value == "000":
+            self._report_from_thread(f"The radio's monitor level (it was {int(value)}) is 0 while armed, to silence its own sidetone. "
+                                     f"It is put back when you disarm.")
+        else:
+            self._report_from_thread(f"The radio did not accept monitor level 0 (it says {now_value}).")
+        if not self.mute_wanted:                           # disarmed while this was going on
+            self._unmute()
+
+    def _unmute(self):
+        """Put the radio's monitor level back. True if a command was sent."""
+        if self.saved_ml is None:
+            return False
+        value, self.saved_ml = self.saved_ml, None
+        radio = self.panel.radio
+        if radio.connected and radio.units == "raw":
+            radio.write_function(f"ML1{value};", "ML1;")
+            self.panel.logq.put(f"CW key: the radio's monitor level was put back to {int(value)}")
+            return True
+        return False
+
     def start_keyer(self):
         """Open the chosen device. Called when the window is armed."""
         self.stop_monitor()
-        self.stop_keyer()
+        self.stop_keyer(keep_mute=True)
+        self.mute_wanted = self.mute_radio.get()
+        if self.mute_wanted:
+            self.radio_tone_mute()
+        else:
+            self._unmute()
         kind = self.device_kind()
         if not (kind["midi"] or kind["serial"]):
+            self.keyer_desc = "no device chosen (the Test key and the text only)"
+            self._armed_with = self.settings_key()
             return True
         k = self.keyer
         if kind["midi"] and self.dev_port.get().strip() == ALL_MIDI:
@@ -3977,6 +4120,9 @@ class CwKeyboard:
                 self.vail = None
                 self.status.set(f"The Vail adapter could not be set up ({exc}). It may be sending keystrokes, not MIDI.")
                 self.panel.append_log(f"CW key: Vail adapter set-up failed: {exc}")
+        self._armed_with = self.settings_key()
+        self.keyer_desc = (f"{self.dev_type.get()} on {self.dev_port.get()}: "
+                           f"{'STRAIGHT KEY, key ' + (self.dit_var.get() or '-') if k.straight else k.mode + ', dit ' + (self.dit_var.get() or '-') + ', dah ' + (self.dah_var.get() or '-')}")
         self.panel.append_log(f"CW key: {self.dev_type.get()} on {self.dev_port.get()}, "
                               f"{'straight key' if k.straight else k.mode}; "
                               f"{'key' if kind['straight'] else 'dit'} {self.dit_var.get() or '-'}"
@@ -3986,7 +4132,10 @@ class CwKeyboard:
                                if kind["serial"] else ""))
         return True
 
-    def stop_keyer(self):
+    def stop_keyer(self, keep_mute=False):
+        if not keep_mute:
+            self.mute_wanted = False
+            self._unmute()
         if self.source is not None:
             try:
                 self.source.close()
@@ -4017,6 +4166,24 @@ class CwKeyboard:
             return None
         return (host[0], port) if host and 1024 <= port <= 65535 else None
 
+    def settings_key(self):
+        return (self.dev_type.get(), self.dev_port.get().strip(), self.dit_var.get().strip(), self.dah_var.get().strip(),
+                self.kmode.get(), self.kmem.get().strip(), self.drive_dtr.get(), self.drive_rts.get(),
+                self.tone_on.get(), self.pitch.get().strip(), self.mute_radio.get())
+
+    def restart_if_armed(self, event=None):
+        """The device and its settings are read when it is armed. A change while armed used to be ignored until you
+        disarmed and armed again (a straight key chosen while the paddles were still open left the iambic keyer
+        running). Now a change re-opens the device at once."""
+        if not self.armed_var.get() or self.settings_key() == self._armed_with:
+            return
+        self.panel.append_log("CW key: the settings changed: re-opening the device")
+        if self.start_keyer():
+            self.status.set("Re-opened with the new settings: " + self.keyer_desc)
+        else:
+            self.armed_var.set(False)
+            self.sender.disarm()
+
     def on_arm(self):
         if self.armed_var.get():
             target = self.key_target()
@@ -4025,9 +4192,10 @@ class CwKeyboard:
                 return self.refuse("there is no usable address or port for the keying daemon", "Not armed")
             self.sender.set_target(target)
             self.sender.arm()
-            self.status.set(f"Armed: sending a heartbeat to {target[0]}:{target[1]} every 100 ms.")
             self.panel.append_log(f"CW key: armed, keying daemon at {target[0]}:{target[1]}")
-            if not self.start_keyer():
+            if self.start_keyer():
+                self.status.set(f"Armed: {self.keyer_desc}. Heartbeat to {target[0]}:{target[1]} every 100 ms.")
+            else:
                 self.armed_var.set(False)
                 self.sender.disarm()
         else:
@@ -4063,7 +4231,34 @@ class CwKeyboard:
         self.sidetone.key(False)
         return None
 
+    def play_text_tone(self, text, wpm):
+        """What is typed or sent from a macro is sent by the daemon far away; the operator should hear it here, so the
+        text is also sounded as a sidetone, with the same timing. (It starts at once: the radio starts after the network.)"""
+        if not self.tone_on.get():
+            return
+        try:
+            self.sidetone.pitch = int(self.pitch.get() or 600)
+        except ValueError:
+            self.sidetone.pitch = 600
+        if not self.sidetone.start():
+            return
+        self._tone_gen += 1
+        gen = self._tone_gen
+        events, _total = cw_morse_events(text, wpm)
+
+        def run():
+            t0 = time.perf_counter() + 0.02
+            for dt, state in events:
+                sleep_until(t0 + dt)
+                if gen != self._tone_gen:                          # Abort, or a newer message
+                    return
+                self.sidetone.key(state)
+            if gen == self._tone_gen:
+                self.sidetone.key(False)
+        threading.Thread(target=run, daemon=True).start()
+
     def on_abort(self):
+        self._tone_gen += 1                           # stops a text sidetone that is playing
         self.keyer.abort()                            # the burst, the sidetone and the key at the radio, at once
         self.sender.abort()                           # the key lets go at once, and whatever was pending is forgotten
         target = self.target()
@@ -4075,6 +4270,10 @@ class CwKeyboard:
 
     def refresh(self, now):
         """Called often while the window is showing."""
+        if self.sender.recently(1.0) or self.link.waiting:
+            self.panel.radio.expect_tx(1.0)                         # poll the TX meters now, do not wait to be told
+        if self.sender.recently(0.3) or self.link.waiting:
+            self.panel.cw_live_until = time.time() + 0.9            # show the meters as live, holding their peaks
         self.target_ok = self.target() is not None
         m = self.monitor
         if m is not None and m.count == 0 and not self.hinted_silence and time.perf_counter() - m.started > 6.0:
@@ -4162,7 +4361,10 @@ class CwWindow:
         if self.kb.link.waiting or self.kb.sender.armed or self.kb.sender.down:
             self.kb.on_abort()
         self.kb.stop_monitor()
+        restored = self.kb.saved_ml is not None
         self.kb.stop_keyer()
+        if restored:
+            time.sleep(0.3)                                  # let the command that restores the radio's monitor level go out
         self.kb.keyer.close()
         self.kb.sender.close()
 
@@ -5244,6 +5446,8 @@ class Panel:
         self.mode_var = tk.StringVar()
         self.power_var = tk.StringVar()
         self.po_peak, self.po_peak_t = 0.0, 0.0
+        self.cw_live_until = 0.0         # while keying CW: show the meters as live (the window sets this)
+        self.meter_hold = {}
         self._atu_led_color = None
         self.band_hf = True
         self.pending_power = (None, 0.0)
@@ -7170,10 +7374,23 @@ class Panel:
 
     def update_meters(self, s, live, now):
         self.update_s_meter(s, now)
+        hinted = now < self.cw_live_until                   # keying CW: the readings exist only while the key is down
+        live = live or hinted
+
+        def held(name, value):
+            """While keying, hold the highest reading for 0.7 s: the polls are few and the elements short."""
+            if not hinted:
+                self.meter_hold.pop(name, None)
+                return value
+            old, t = self.meter_hold.get(name, (0, 0.0))
+            if value >= old or now - t > 0.7:
+                self.meter_hold[name] = (value, now)
+                return value
+            return old
         raw_mode = self.radio.units == "raw"
         full_scale = 100.0 if self.band_hf else 50.0
         # power out
-        po_read = (s["po_raw"] if raw_mode else s["po_w"]) or 0
+        po_read = held("po", (s["po_raw"] if raw_mode else s["po_w"]) or 0)
         true_po = interp(self.cal["po"], po_read, 0.0)
         watts = true_po if true_po is not None else (None if raw_mode else po_read)
         if live:
@@ -7194,7 +7411,7 @@ class Panel:
             self.bars["po"].set(0, GREY, self.po_peak if self.po_peak else None)
             self.texts["po"].set("--")
         # SWR
-        swr_read = (s["swr_raw"] or 0) if raw_mode else (s["swr"] or 1.0)
+        swr_read = held("swr", (s["swr_raw"] or 0) if raw_mode else (s["swr"] or 1.0))
         true_swr = interp(self.cal["swr"], swr_read, 1.0)
         ratio = true_swr if true_swr is not None else (None if raw_mode else swr_read)
         if live and ratio is None:
@@ -7208,7 +7425,7 @@ class Panel:
             self.bars["swr"].set(0, GREY)
             self.texts["swr"].set("--")
         # ALC
-        alc = self.alc_fraction(s, raw_mode)
+        alc = held("alc", self.alc_fraction(s, raw_mode))
         if live:
             shown = round(100 * alc)                # the colour follows the number that is shown
             color = RED if shown > 100 * ALC_BAD else AMBER if shown > 100 * ALC_WARN else GREEN

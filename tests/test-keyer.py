@@ -250,3 +250,30 @@ except RuntimeError as exc: print("   a helper that dies when the port is opened
 for key in ("FT991A_FAKE_RTMIDI", "FT991A_FAKE_PORTS_IN"): os.environ.pop(key, None)
 helper = fp.MidiHelper(None, None, env=dict(os.environ, FT991A_FAKE_RTMIDI="ok")); ports = helper.request({"cmd": "ports"}, "ports")
 print("   asked for the ports, the helper answers:", ports["in"], ports["out"], ok(ports["in"] == ["Fake MIDI"])); helper.close()
+
+print("--- 14. lines that move together are ONE paddle (the user's HaliKey serial: CTS alone, and DSR with DCD)")
+class FakeSerial:
+    def __init__(self): self.cts = self.dsr = self.cd = False; self.ri = True; self.dtr = self.rts = False
+fs = FakeSerial(); reports = []; mon = fp.DeviceMonitor(reports.append); mon.start_serial(fs); time.sleep(0.05)
+fs.cts = True; time.sleep(0.04); fs.cts = False; time.sleep(0.04)                       # the first paddle: CTS alone
+fs.dsr = True; fs.cd = True; time.sleep(0.04); fs.dsr = False; fs.cd = False; time.sleep(0.04)   # the second: DSR and DCD together
+print("   the lines that closed, grouped:", mon.groups, ok(mon.groups == [["CTS"], ["DSR", "DCD"]]))
+print("   it says so:", [r[:75] for r in reports if "change together" in r], ok(any("DSR and DCD change together" in r for r in reports))); mon.stop()
+
+print("--- 15. the text sidetone's Morse is the daemon's Morse (so what you hear is what is keyed)")
+kdm = _load("kd15", "keying-daemon.py")
+for text, wpm in (("PARIS PARIS", 20), ("CQ CQ DE NK8O NK8O K", 25), ("TU 73 DE NK8O <", 18), ("QRZ? 599 = *", 30)):
+    mine, mt = fp.cw_morse_events(text, wpm); theirs, tt = kdm.morse_events(text, wpm)
+    print(f"   {text!r} at {wpm} wpm: {len(mine)} edges, {mt:.3f} s", ok(mine == theirs and abs(mt - tt) < 1e-12))
+ev, total = fp.cw_morse_events("PARIS PARIS", 20)
+print("   'PARIS PARIS' at 20 wpm takes", round(total, 3), "s (standard 96 dots x 60 ms = 5.760 s)", ok(abs(total - 5.76) < 1e-9))
+
+print("--- 16. the user's Vail adapter shows up as 'QT Py M0' (its board), and is set up even when listening to every input")
+os.environ.update(FT991A_FAKE_RTMIDI="ok", FT991A_FAKE_PORTS_IN=json.dumps(["Midi Through Port-0", "QT Py M0", "HaliKey MIDI"]), FT991A_FAKE_PORTS_OUT=json.dumps(["Midi Through Port-0", "QT Py M0", "HaliKey MIDI"]))
+vlog = tempfile.mktemp(suffix=".log"); os.environ["FT991A_FAKE_LOG"] = vlog
+reports = []; mon = fp.DeviceMonitor(reports.append); mon.start_midi(fp.ALL_MIDI, vail=True, wpm=20, pitch=600)
+time.sleep(0.5)                                         # the helper writes its log in its own process
+sent = [json.loads(l) for l in open(vlog)] if os.path.exists(vlog) else []
+print("   told:", [r[:70] for r in reports if "MIDI mode" in r], ok(any("told 'QT Py M0' to use MIDI mode" in r for r in reports)))
+print("   and ONLY that port got the set-up (not 'Midi Through' or the HaliKey): outputs written to:", sorted({m["out"] for m in sent}), ok(sorted({m["out"] for m in sent}) == [1] and len(sent) == 4)); mon.stop()
+for k in ("FT991A_FAKE_RTMIDI", "FT991A_FAKE_PORTS_IN", "FT991A_FAKE_PORTS_OUT", "FT991A_FAKE_LOG"): os.environ.pop(k, None)

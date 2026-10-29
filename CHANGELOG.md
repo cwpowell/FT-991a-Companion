@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.5.0
+
+From testing 1.4.4 with the HaliKey MIDI (iambic B works well at 20 and 32 wpm), a HaliKey serial key and a Vail adapter.
+
+- **HaliKey serial: lines that move together are one paddle.** The Monitor log showed CTS moving alone for one paddle
+  and **DSR and DCD moving together** for the other. The defaults (dit = DSR, dah = DCD) therefore closed both
+  "paddles" whenever that paddle was pressed (a squeeze: alternating `.-.-`), and the other paddle's line, CTS, was
+  not assigned (no dits at all). The Monitor now groups lines that change within 5 ms and says "DSR and DCD change
+  together: they are one paddle", and **Use what was seen** uses one line per paddle (dit = CTS, dah = DSR here).
+- **Changing the device or its settings while armed takes effect at once.** Before, the device, port, notes or lines,
+  mode, memory, pitch, sidetone and DTR/RTS were read only when you armed. Choosing **MIDI straight key** while the
+  paddles were still armed left the iambic keyer running, so the straight key seemed not to disengage it. Any
+  change now re-opens the device (nothing happens if nothing really changed), and the status names what is armed,
+  for example `Armed: MIDI straight key on HaliKey MIDI: STRAIGHT KEY, key 20`.
+- **Changing the device type no longer swaps your port.** It used to replace it with the first port in the list (even
+  while armed). Now an empty port is filled in, a port you chose is kept, and only switching between MIDI and serial
+  clears it (the old name is meaningless there).
+- **What you type, and the macros, are heard at the panel too.** The text is also sounded as a sidetone, with the same
+  Morse timing as the keying daemon (tested to be identical), starting at once. Abort, or a newer message, stops it.
+  It uses the Sidetone tick box and the pitch.
+- **Mute radio tone** (optional, off by default). While armed it sets the radio's monitor level (`ML1`) to 0 to silence
+  the radio's own CW sidetone at its location, and puts the level back when you disarm, untick it, or close the
+  panel. **This is unverified on the FT-991A**: the Yaesu FT-891 manual says its sidetone level follows "MONITOR", and
+  the FT-991A's CAT command for that is ML. If the radio still sounds, tell us. It changes the SSB transmit monitor
+  too, which is why it is put back.
+- **The meters while keying.** The power, SWR and ALC meters were polled only while the panel *believed* the radio was
+  transmitting, and it learnt that from a `TX;` query every half second: with 50 ms elements the meters showed
+  only now and then, and appeared half a second late. The panel knows when it is keying, so it now tells the poller:
+  while a key, paddles or text are being sent it polls the meters about every 0.2 s (and `TX;` every 0.3 s), shows
+  them as live, and holds the highest reading for 0.7 s. They still cannot track single elements (the radio is
+  asked a few times a second), and the ALC bar is a sample, not the radio's own peak meter.
+- The Monitor sets up a Vail adapter whose MIDI port is named after its board (**QT Py M0**) when listening to every
+  input, and sends the set-up only to that port, never to other MIDI devices.
+- The Vail adapter in your log answered the MIDI-mode message (it echoed control change 0 and released notes 0, 1
+  and 2), so the set-up works. Press the paddles while the Monitor runs: in passthrough it sends notes 1 and 2.
+
 ## 1.4.4
 
 - **python-rtmidi no longer runs inside the panel at all.** On a Mac with Python 3.14, 1.4.3 still aborted ("Abort
