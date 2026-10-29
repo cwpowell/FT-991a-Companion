@@ -62,7 +62,7 @@ VENV="build/venv-$LABEL"
 # shellcheck disable=SC1091
 . "$VENV/bin/activate"
 python -m pip install --quiet --upgrade pip
-python -m pip install --quiet pyinstaller sounddevice opuslib numpy
+python -m pip install --quiet pyinstaller sounddevice opuslib numpy pyserial python-rtmidi
 
 # 3. the app
 rm -rf "dist/$LABEL" "build/work-$LABEL"

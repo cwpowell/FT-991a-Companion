@@ -55,7 +55,7 @@ a = Analysis(
     binaries=binaries,
     # the licence files travel inside every packaged program (see license_dir() in the panel)
     datas=[(os.path.join(ROOT, name), "licenses") for name in ("LICENSE", "NOTICE.md", "THIRD-PARTY-LICENSES.txt")],
-    hiddenimports=[],
+    hiddenimports=["serial", "serial.tools.list_ports", "rtmidi"],      # the paddles (imported only when one is chosen)
     # numpy is needed (noise reduction); these are not, and leaving them out keeps the app smaller
     excludes=["matplotlib", "scipy", "pandas", "PIL"],
     noarchive=False,

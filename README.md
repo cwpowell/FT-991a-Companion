@@ -65,7 +65,9 @@ The screenshots were taken against the simulated radio in this repository.
   tells you when a message has finished, **Abort** stops it at once, and **Zero in** starts the radio's CW
   auto zero-in. It refuses unless the radio is in a CW mode and not transmitting. A **Key** row (**Arm**, and a
   **Test key** that you hold like a straight key) sends key-down and key-up to `keying-daemon.py` on the
-  radio's computer, which keeps their timing exactly.
+  radio's computer, which keeps their timing exactly. A **Paddle or key** box adds a keyer: a MIDI or serial
+  straight key or paddles, or a Vail adapter, with iambic A or B, a dit memory and a sidetone. Its iambic
+  logic and its MIDI and serial input handling come from W7DA's K4-Companion (see `NOTICE.md`).
 
 **Menu tab**
 
@@ -161,6 +163,7 @@ You can also build on your own computer: `bash packaging/build-macos.sh` or
 | `keying-daemon.py` | the radio's computer | Keys the radio through a serial port's DTR line from far away, with the timing of timestamped key events kept by a jitter buffer. It also understands cwdaemon's text commands. Needs `pyserial`. Not used by the panel yet. |
 | `keying-daemon.service` | the radio's computer | systemd user service that runs the keying daemon. |
 | `tests/test-keying-daemon.py` | any | Tests for the keying daemon. They touch no radio. |
+| `tests/test-keyer.py`, `tests/test-keyer-chain.py` | any | Tests for the keyer, alone and through the real sender into the keying daemon. They touch no radio. |
 | `radio-power.sh` | the radio's computer | Switches the radio on or off over its CAT port. |
 | `freedv-guard.sh` | the radio's computer | Keeps FreeDV's audio device settings from being overwritten. |
 | `rigtest.sh`, `nettest.sh` | the radio's computer | Diagnostics for `rigctld` and Hamlib's network client. They never key the transmitter. |
@@ -193,8 +196,8 @@ Developed against the simulators in this repository. The maintainer has run it a
 FT-991A over ser2net from macOS: the control panel, remote power on and off, push-to-talk, and
 audio in both directions with PCM and Opus,  and the local-radio audio mode. The Function tab, the 
 Band pull-down and the noise reduction have also been tested and seem to function within normal 
-operating parameters. The CW window has so far been tested only against the simulators and the real
-`cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
+operating parameters. The CW window, its keyer, and the MIDI and serial inputs have so far been tested
+only against simulated devices, the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
 an issue with the log and the status text from the Audio tab.
 
 ## Documentation

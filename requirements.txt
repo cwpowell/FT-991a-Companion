@@ -7,4 +7,7 @@ numpy
 
 # Optional, for the Opus codec. It also needs the Opus library (libopus; opus.dll on Windows).
 opuslib
-# pyserial        only for keying-daemon.py, on the radio's computer
+# Optional, for paddles and keys: pyserial reads a serial paddle or key (and is needed by keying-daemon.py
+# on the radio's computer); python-rtmidi reads a MIDI one (a HaliKey MIDI, a Vail adapter).
+pyserial
+python-rtmidi

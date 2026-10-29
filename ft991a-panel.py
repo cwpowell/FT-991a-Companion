@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.3.0"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.4.0"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -2592,6 +2592,438 @@ class KeyEventSender:
         self.disarm()
 
 
+# ---- the keyer: paddles and keys become key-down and key-up edges -----------------------------------
+# Parts of this section are derived from K4-Companion by Dale Farnsworth, W7DA (Copyright (C) 2025,
+# GPL-3.0-or-later), used with his permission: the iambic decision logic (Keyer.choose_element and
+# paddle_timestamps), the way a MIDI paddle's own timing and clock are used (MidiPaddles.handle and
+# device_timestamp), and the way serial paddle lines are read (SerialPaddles). They were rewritten for this
+# program. K4-Companion sends its keying to a K4; here every element goes to a KeyEventSender instead, and the
+# sidetone is simpler. Iambic A, iambic B and the straight key are offered; Ultimatic is not.
+
+KEYER_MODES = ("Iambic B", "Iambic A")
+KEYER_DEVICES = ("None", "MIDI straight key", "MIDI paddles", "Serial straight key", "Serial paddles",
+                 "Vail adapter (paddles)", "Vail adapter (its own keyer)")
+SERIAL_SIGNALS = ("CTS", "DSR", "DCD", "RI")
+DIT_DOWN, DIT_UP, DAH_DOWN, DAH_UP = "dit_down", "dit_up", "dah_down", "dah_up"
+LOOKAHEAD = 0.003             # the next element is chosen this long before it starts
+
+
+def sleep_until(when):
+    """Sleep until time.perf_counter() reaches `when`, accurately: sleep most of it, spin the last moments."""
+    while True:
+        left = when - time.perf_counter()
+        if left <= 0:
+            return
+        time.sleep(left - 0.0015 if left > 0.003 else 0)
+
+
+class Sidetone:
+    """The tone the operator hears, made here and now, so it does not wait for the radio. It is a sine at the
+    CW pitch with soft edges (the level ramps across each audio block), played by sounddevice on the default
+    output. Without sounddevice or numpy there is no sidetone, and everything else works."""
+
+    def __init__(self, pitch=600, volume=0.25):
+        self.pitch, self.volume = int(pitch), volume
+        self.on, self.stream, self.error = False, None, None
+        self.failed = False                   # once it cannot start it is not tried again on every key press
+        self._phase, self._level, self.rate = 0.0, 0.0, 48000
+
+    def start(self):
+        if self.stream is not None:
+            return True
+        if self.failed:
+            return False
+        try:
+            import numpy as np
+            import sounddevice as sd
+        except Exception as exc:
+            self.error, self.failed = f"no sidetone: {type(exc).__name__}", True
+            return False
+        self._np = np
+
+        def callback(outdata, frames, _time, _status):
+            target = 1.0 if self.on else 0.0
+            ramp = np.linspace(self._level, target, frames, dtype=np.float32)
+            phase = self._phase + (2 * np.pi * self.pitch / self.rate) * np.arange(frames)
+            outdata[:, 0] = (np.sin(phase) * ramp * self.volume).astype(np.float32)
+            self._phase = float((phase[-1] + 2 * np.pi * self.pitch / self.rate) % (2 * np.pi))
+            self._level = target
+
+        try:
+            self.stream = sd.OutputStream(samplerate=self.rate, channels=1, dtype="float32", latency="low",
+                                          callback=callback)
+            self.stream.start()
+        except Exception as exc:
+            self.stream, self.error, self.failed = None, f"no sidetone: {exc}", True
+            return False
+        return True
+
+    def key(self, down):
+        self.on = bool(down)
+
+    def stop(self):
+        self.on = False
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+
+
+class Keyer:
+    """Turns paddle or key events into elements and sends their edges to a KeyEventSender.
+
+    A straight key's edges go straight through. For paddles (iambic A or B) a burst starts when a paddle
+    closes: the first element is chosen at once, and after each element the next one is chosen just before it
+    is due, from the history of the paddle events, by the rules in choose_element. Both edges of an element are
+    sent when it is chosen, stamped with their true times, so the daemon replays them with exactly that spacing.
+    The sidetone sounds for the same stretches, timed here."""
+    STRAIGHT_DOWN, STRAIGHT_UP = DIT_DOWN, DIT_UP
+
+    def __init__(self, sender, sidetone=None, log=None):
+        self.sender, self.sidetone = sender, sidetone
+        self.log = log or (lambda msg: None)
+        self.mode = KEYER_MODES[0]
+        self.memory_percent = 33              # the dit memory delay, as W7DA's keyer calls it
+        self.weighting = 1.0
+        self.straight = False
+        self.set_speed(20)
+        self.history = collections.deque(maxlen=128)
+        self.stamps = {DIT_UP: 0.0, DAH_UP: 0.0, DIT_DOWN: 0.0, DAH_DOWN: 0.0}
+        self.lock = threading.Lock()
+        self.queue = queue.Queue()
+        self.key_down = False
+        self.gate = None                      # called when a paddle closes: a reason not to key, or None
+        self.on_refused = None                # told the reason, at most every 3 s
+        self._refused_at = 0.0
+        self._abort = False
+        self._closed = False
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    # ---- the element lengths ---------------------------------------------------------------------------
+    def set_speed(self, wpm):
+        dit = 1.2 / max(4, min(60, int(wpm)))
+        delta = (1 - self.weighting) / (1 + self.weighting)
+        self.dit_seconds = dit * (1 - delta)
+        self.dah_seconds = 3 * dit * (1 - delta)
+        self.gap_seconds = dit * (1 + delta)
+
+    def tone_seconds(self, element):
+        return self.dit_seconds if element == "." else self.dah_seconds
+
+    # ---- paddle events: from a MIDI or serial source, or the test key -----------------------------------
+    def paddle(self, event, timestamp=None):
+        """event is DIT_DOWN, DIT_UP, DAH_DOWN or DAH_UP (a straight key uses the dit ones); timestamp is
+        when it happened on the perf_counter clock, where the device knows that better than now."""
+        ts = time.perf_counter() if timestamp is None else timestamp
+        if self.gate is not None and event in (DIT_DOWN, DAH_DOWN):
+            why = self.gate()
+            if why:
+                if self.on_refused and time.perf_counter() - self._refused_at > 3.0:
+                    self._refused_at = time.perf_counter()
+                    self.on_refused(why)
+                return
+        if self.straight:
+            down = event == DIT_DOWN
+            if event in (DIT_DOWN, DIT_UP):
+                with self.lock:
+                    if down == self.key_down:
+                        return
+                    self.key_down = down
+                    self.sender.edge(down, at=ts)
+                    if self.sidetone:
+                        self.sidetone.key(down)
+            return
+        with self.lock:
+            self.stamps[event] = ts
+            self.history.append((ts, event))
+        self.queue.put(event)
+
+    def release(self):
+        """Every key and paddle is let go (a device was closed, or the panel is stopping)."""
+        with self.lock:
+            if self.key_down:
+                self.sender.edge(False)
+                self.key_down = False
+            if self.sidetone:
+                self.sidetone.key(False)
+            now = time.perf_counter()
+            for up, down in ((DIT_UP, DIT_DOWN), (DAH_UP, DAH_DOWN)):
+                if self.stamps[down] > self.stamps[up]:
+                    self.stamps[up] = now
+
+    def abort(self):
+        """Stop now: the burst, the sidetone, and the key at the radio."""
+        self._abort = True
+        self.release()
+        self.sender.abort()
+
+    # ---- the iambic logic (from W7DA's keyer) --------------------------------------------------------------
+    def paddle_timestamps(self, as_of=None):
+        """(dit up, dah up, dit down, dah down): when each last happened, as the paddles stood at as_of (a
+        perf_counter time), or as they stand now. A reading is about the moment it was due, so an event that
+        came after as_of has not happened yet."""
+        names = (DIT_UP, DAH_UP, DIT_DOWN, DAH_DOWN)
+        if as_of is None:
+            return tuple(self.stamps[n] for n in names)
+        found = {}
+        for ts, ev in reversed(tuple(self.history)):
+            if ts > as_of or ev in found:
+                continue
+            found[ev] = ts
+            if len(found) == 4:
+                break
+        return tuple(found.get(n, self.stamps[n] if self.stamps[n] <= as_of else 0.0) for n in names)
+
+    def choose_element(self, previous_elt, previous_look_ts, previous_heard_ts, as_of=None):
+        """The element the paddles, and what is remembered of them, ask for next ('.' or '-'), or None.
+        previous_heard_ts is when the previous element started; previous_look_ts is when the paddles were
+        last looked at to choose it."""
+        dit_up_ts, dah_up_ts, dit_down_ts, dah_down_ts = self.paddle_timestamps(as_of)
+        dit_up_memory_delay = self.memory_percent / 100 * (self.dah_seconds + self.gap_seconds)
+        heard, look = previous_heard_ts, previous_look_ts
+        dit_held = dit_down_ts > dit_up_ts
+        dah_held = dah_down_ts > dah_up_ts
+        dit, dah = dit_held, dah_held
+        if previous_elt is not None:
+            # a dit closed during a dah is remembered (iambic A and B)
+            dit = dit or (previous_elt == "-" and dit_down_ts > heard)
+            if self.mode == "Iambic B":
+                # a paddle released during the element just sent is remembered, and one more element goes out
+                # for it: a tap made while the element was going out, or a squeeze that was let go of
+                dit_tapped = dit_down_ts > look and dit_up_ts - look > dit_up_memory_delay
+                dit_squeeze_released = not dah_held and dit_up_ts - heard > dit_up_memory_delay
+                dit = dit or (previous_elt == "-" and (dit_tapped or dit_squeeze_released))
+                dah_tapped = dah_down_ts > look and dah_up_ts > look
+                dah_squeeze_released = not dit_held and dah_up_ts > heard
+                dah = dah or (previous_elt == "." and (dah_tapped or dah_squeeze_released))
+        if dit and dah:
+            if previous_elt is None:
+                return "-" if dah_down_ts < dit_down_ts else "."     # the one closed first; a dit if together
+            return "-" if previous_elt == "." else "."               # a squeeze alternates
+        if dit:
+            return "."
+        if dah:
+            return "-"
+        return None
+
+    # ---- the thread that sends a burst ------------------------------------------------------------------------
+    def _run(self):
+        while not self._closed:
+            try:
+                self.queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if self._closed:
+                return
+            if not self.straight:
+                self._burst()
+
+    def _send_element(self, elt, start):
+        tone = self.tone_seconds(elt)
+        self.sender.edge(True, at=start)
+        self.sender.edge(False, at=start + tone)
+        return tone
+
+    def _burst(self):
+        self._abort = False
+        elt = self.choose_element(None, None, None)
+        if elt is None:
+            return
+        start = time.perf_counter()
+        look = start
+        elements = []
+        try:
+            while elt is not None and not self._abort:
+                tone = self._send_element(elt, start)
+                elements.append(elt)
+                sleep_until(start)
+                if self.sidetone:
+                    self.sidetone.key(True)
+                sleep_until(start + tone)
+                if self.sidetone:
+                    self.sidetone.key(False)
+                next_start = start + tone + self.gap_seconds
+                due = next_start - LOOKAHEAD
+                sleep_until(due)
+                if self._abort:
+                    break
+                nxt = self.choose_element(elt, look, start, as_of=next_start)
+                look = due
+                elt, start = nxt, next_start
+        finally:
+            if self.sidetone:
+                self.sidetone.key(False)
+            self.log("keyer: " + "".join(elements)) if elements else None
+
+    def close(self):
+        self._closed = True
+        self._abort = True
+        self.queue.put(None)
+        self.release()
+
+
+class MidiPaddles:
+    """A MIDI key or paddle (a HaliKey MIDI, a Vail adapter, and the like) read with python-rtmidi. A note on
+    is a paddle closing and a note off is it opening. The device can put its own timing in the message: a
+    velocity from 1 to 126 is the milliseconds since its last message, and a control change adds longer gaps
+    (value x 126 ms). The device's clock is rebuilt from those, and set on perf_counter by the least that any
+    message has lately arrived behind it, so that a stalled computer does not distort the keying."""
+    REANCHOR = 1.0
+
+    def __init__(self, keyer, dit_notes, dah_notes):
+        self.keyer, self.dit_notes, self.dah_notes = keyer, list(dit_notes), list(dah_notes)
+        self.midiin = None
+        self.delta = 0.0
+        self.last_midi_delta = 0.0
+        self.device_clock, self.clock_offset = 0.0, None
+        self.dit_was_down = self.dah_was_down = False
+
+    @staticmethod
+    def ports():
+        try:
+            import rtmidi
+            return rtmidi.MidiIn().get_ports()
+        except Exception:
+            return []
+
+    def open(self, port_name):
+        import rtmidi
+        self.midiin = rtmidi.MidiIn()
+        names = self.midiin.get_ports()
+        match = [i for i, n in enumerate(names) if n == port_name or (port_name and port_name in n)]
+        if not match:
+            raise RuntimeError(f"MIDI port '{port_name}' not found; there are {names or 'none'}")
+        self.midiin.open_port(match[0])
+        self.midiin.set_callback(self._callback)
+
+    def _callback(self, event, data=None):
+        try:
+            self.handle(*event)
+        except Exception as exc:                             # never let the MIDI thread die
+            self.keyer.log(f"keyer: a MIDI message failed: {type(exc).__name__}: {exc}")
+
+    def device_timestamp(self, delta):
+        """When a message happened, on perf_counter, by the device's own count rather than when it arrived."""
+        arrived = time.perf_counter()
+        self.device_clock += delta
+        offset = arrived - self.device_clock
+        if (self.clock_offset is None or delta >= self.REANCHOR or offset - self.clock_offset >= self.REANCHOR):
+            self.clock_offset = offset
+        else:
+            self.clock_offset = min(self.clock_offset, offset)
+        return self.device_clock + self.clock_offset
+
+    def handle(self, message, midi_delta):
+        status, note, velocity = (list(message) + [0, 0, 0])[:3]
+        if midi_delta >= 0.001:
+            self.last_midi_delta = midi_delta
+        if status in (0xB0, 0xA0):                       # a control change: a longer gap, for the next message
+            self.delta = (velocity * 126) / 1000
+            return
+        if velocity == 0 or velocity == 127:             # no time in the message: the MIDI delta
+            self.delta = midi_delta
+        else:
+            self.delta += velocity / 1000
+        timestamp = self.device_timestamp(self.delta) if status in (0x90, 0x80) else None
+        keyer = self.keyer
+        if status == 0x90:                               # a note on is a key down, whatever its velocity: the
+            if note in self.dit_notes:                   # velocity is the device's timing, and 0 means none
+                self.dit_was_down = True
+                keyer.paddle(DIT_DOWN, timestamp)
+            elif note in self.dah_notes:
+                self.dah_was_down = True
+                keyer.paddle(DAH_DOWN, timestamp)
+        elif status == 0x80:
+            if note in self.dit_notes and self.dit_was_down:
+                self.dit_was_down = False
+                keyer.paddle(DIT_UP, timestamp)
+            elif note in self.dah_notes and self.dah_was_down:
+                self.dah_was_down = False
+                keyer.paddle(DAH_UP, timestamp)
+        self.delta = 0.0
+
+    def close(self):
+        if self.midiin is not None:
+            try:
+                self.midiin.cancel_callback()
+                self.midiin.close_port()
+            except Exception:
+                pass
+            self.midiin = None
+        self.keyer.release()
+
+
+class SerialPaddles:
+    """A serial key or paddles (a HaliKey serial, and the like): the modem lines CTS, DSR, DCD and RI are read
+    every millisecond. How the lines stand when the port opens is where they rest, so only a change from it is
+    a key closing. A straight key is debounced for 20 ms."""
+
+    def __init__(self, keyer, device, dit_signal="DSR", dah_signal="DCD", straight=False):
+        import serial
+        self.keyer, self.straight = keyer, straight
+        self.dit_signal, self.dah_signal = dit_signal.upper(), dah_signal.upper()
+        self._owned = not hasattr(device, "dsr")          # a port that is already open is left open
+        self.port = serial.serial_for_url(device, rtscts=False, dsrdtr=False) if self._owned else device
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def ports():
+        try:
+            from serial.tools import list_ports
+            return [p.device for p in list_ports.comports()]
+        except Exception:
+            return []
+
+    def _read(self, name):
+        p = self.port
+        return {"CTS": p.cts, "DSR": p.dsr, "DCD": p.cd, "RI": p.ri}[name]
+
+    def _loop(self):
+        debounce = 0.020 if self.straight else 0.0
+        try:
+            dit_state = self._read(self.dit_signal)
+            dah_state = False if self.straight else self._read(self.dah_signal)
+        except Exception:
+            return
+        changed = {"dit": None, "dah": None}
+        state = {"dit": dit_state, "dah": dah_state}
+        while not self._stop.is_set():
+            try:
+                now_state = {"dit": self._read(self.dit_signal),
+                             "dah": False if self.straight else self._read(self.dah_signal)}
+            except Exception:
+                return                                  # the port was closed under us
+            for which in ("dit", "dah"):
+                if now_state[which] != state[which]:
+                    changed[which] = time.perf_counter()
+                    state[which] = now_state[which]
+                if changed[which] is not None and time.perf_counter() - changed[which] >= debounce:
+                    event = (DIT_DOWN if state[which] else DIT_UP) if which == "dit" else \
+                            (DAH_DOWN if state[which] else DAH_UP)
+                    try:
+                        self.keyer.paddle(event, changed[which])
+                    except Exception as exc:                 # never let the reader die
+                        self.keyer.log(f"keyer: a paddle event failed: {type(exc).__name__}: {exc}")
+                    changed[which] = None
+            time.sleep(0.001)
+
+    def close(self):
+        self._stop.set()
+        self.thread.join(timeout=0.5)
+        if self._owned:
+            try:
+                self.port.close()
+            except Exception:
+                pass
+        self.keyer.release()
+
+
 class CwKeyboard:
     """The inside of the CW window: type text, or press a macro, and cwdaemon (running on the
     radio's computer) keys the radio with it. Abort stops it at once."""
@@ -2609,6 +3041,19 @@ class CwKeyboard:
         self.port = tk.StringVar(value=str(c.get("cwd_port", CWD_PORT)))
         self.status = tk.StringVar(value="Ready.")
         self.keyd_port = tk.StringVar(value=str(c.get("keyd_port", KEYD_PORT)))
+        self.target_ok = True                 # kept up to date on the main thread, read by the paddles' threads
+        self.pending_status = None            # a message from another thread, shown by refresh()
+        dev = c.get("kdev", "None")
+        self.dev_type = tk.StringVar(value=dev if dev in KEYER_DEVICES else "None")
+        self.dev_port = tk.StringVar(value=str(c.get("kport", "")))
+        self.dit_var = tk.StringVar(value=str(c.get("kdit", "")))
+        self.dah_var = tk.StringVar(value=str(c.get("kdah", "")))
+        mode = c.get("kmode", KEYER_MODES[0])
+        self.kmode = tk.StringVar(value=mode if mode in KEYER_MODES else KEYER_MODES[0])
+        self.kmem = tk.StringVar(value=str(c.get("kmem", 33)))
+        self.tone_on = tk.BooleanVar(value=bool(c.get("tone_on", True)))
+        self.pitch = tk.StringVar(value=str(c.get("pitch", 600)))
+        self.source = None
         self.armed_var = tk.BooleanVar(value=False)
         self.sender = KeyEventSender()
         self.sender.token = int(c.get("keyd_token", 0) or 0) & 0xFFFF
@@ -2665,14 +3110,47 @@ class CwKeyboard:
         self.test_key.grid(row=0, column=4, padx=(10, 0))
         self.test_key.bind("<ButtonPress-1>", self.on_key_press)
         self.test_key.bind("<ButtonRelease-1>", self.on_key_release)
+        kfr = ttk.LabelFrame(box, text="Paddle or key", padding=(6, 3))
+        kfr.grid(row=10, column=0, columnspan=5, sticky="ew", pady=(6, 0))
+        ttk.Label(kfr, text="Device").grid(row=0, column=0, sticky="w")
+        self.dev_cb = ttk.Combobox(kfr, textvariable=self.dev_type, values=KEYER_DEVICES, state="readonly", width=27)
+        self.dev_cb.grid(row=0, column=1, columnspan=3, sticky="w", pady=1)
+        self.dev_cb.bind("<<ComboboxSelected>>", self.on_device_changed)
+        ttk.Label(kfr, text="Port").grid(row=1, column=0, sticky="w")
+        self.port_cb = ttk.Combobox(kfr, textvariable=self.dev_port, width=27)
+        self.port_cb.grid(row=1, column=1, columnspan=3, sticky="w", pady=1)
+        ttk.Button(kfr, text="Refresh", style="Compact.TButton", command=self.refresh_ports).grid(row=1, column=4, padx=(4, 0))
+        self.dit_lbl = ttk.Label(kfr, text="Dit")
+        self.dit_lbl.grid(row=2, column=0, sticky="w")
+        self.dit_entry = ttk.Entry(kfr, textvariable=self.dit_var, width=8)
+        self.dit_entry.grid(row=2, column=1, sticky="w", pady=1)
+        self.dah_lbl = ttk.Label(kfr, text="Dah")
+        self.dah_lbl.grid(row=2, column=2, sticky="e", padx=(8, 3))
+        self.dah_entry = ttk.Entry(kfr, textvariable=self.dah_var, width=8)
+        self.dah_entry.grid(row=2, column=3, sticky="w")
+        ttk.Label(kfr, text="Mode").grid(row=3, column=0, sticky="w")
+        ttk.Combobox(kfr, textvariable=self.kmode, values=KEYER_MODES, state="readonly", width=10).grid(row=3, column=1, sticky="w", pady=1)
+        ttk.Label(kfr, text="Dit memory %").grid(row=3, column=2, sticky="e", padx=(8, 3))
+        ttk.Entry(kfr, textvariable=self.kmem, width=5).grid(row=3, column=3, sticky="w")
+        ttk.Checkbutton(kfr, text="Sidetone", variable=self.tone_on).grid(row=4, column=0, columnspan=2, sticky="w")
+        ttk.Label(kfr, text="Pitch Hz").grid(row=4, column=2, sticky="e", padx=(8, 3))
+        ttk.Entry(kfr, textvariable=self.pitch, width=5).grid(row=4, column=3, sticky="w")
+        for w in (self.dev_cb, self.port_cb):
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                w.bind(seq, lambda e: "break")
         ttk.Label(box, textvariable=self.status, foreground="#333333", wraplength=380,
-                  justify="left").grid(row=10, column=0, columnspan=5, sticky="w", pady=(4, 0))
+                  justify="left").grid(row=11, column=0, columnspan=5, sticky="w", pady=(4, 0))
         ttk.Label(box, foreground="#666666", wraplength=380, justify="left", text=(
             "Needs cwdaemon on the radio's computer (cwdaemon -n -d <the radio's second serial port> "
             "-x n) and the radio's menu 060 PC KEYING set to DTR. In macros, [MYCALL] and [CALL] are "
             "replaced. Prosigns: * AR, = BT, < SK, ( KN, ! SN, & AS, > BK. + and - are left out. A blank "
             "address means the radio's computer.")
-        ).grid(row=11, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        ).grid(row=12, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        self.sidetone = Sidetone(int(self.pitch.get() or 600))
+        self.keyer = Keyer(self.sender, self.sidetone, log=self.panel.logq.put)
+        self.keyer.gate = self.thread_gate
+        self.keyer.on_refused = self._refused_from_thread
+        self.on_device_changed(defaults=not (self.dit_var.get() or self.dah_var.get()))
         self.on_speed()
 
     def settings(self):
@@ -2680,10 +3158,14 @@ class CwKeyboard:
         return dict(cw_wpm=self.wpm.get(), cw_mycall=self.mycall.get().strip(),
                     cw_macros=[m.get() for m in self.macros], cwd_host=self.host.get().strip(),
                     cwd_port=self.port.get().strip(), keyd_port=self.keyd_port.get().strip(),
-                    keyd_token=self.sender.token)
+                    keyd_token=self.sender.token, kdev=self.dev_type.get(), kport=self.dev_port.get(),
+                    kdit=self.dit_var.get(), kdah=self.dah_var.get(), kmode=self.kmode.get(),
+                    kmem=self.kmem.get(), tone_on=self.tone_on.get(), pitch=self.pitch.get())
 
     def on_speed(self):
         self.speed_lbl.configure(text=f"{int(round(self.wpm.get()))} wpm")
+        if hasattr(self, "keyer"):
+            self.keyer.set_speed(int(round(self.wpm.get())))
 
     def target(self):
         p = self.panel
@@ -2696,6 +3178,13 @@ class CwKeyboard:
         return (host, port) if host and 1024 <= port <= 65535 else None
 
     def reason_not_to_send(self):
+        """Why nothing should be keyed now, or None. Main thread only (it reads the window's fields)."""
+        self.target_ok = self.target() is not None
+        return self.thread_gate()
+
+    def thread_gate(self):
+        """The same, safe to call from any thread, such as a paddle's: it reads no Tk variable. The address
+        check is the flag the main thread last set."""
         p = self.panel
         radio, s = p.radio, p.radio.snapshot()
         if not radio.connected:
@@ -2707,7 +3196,7 @@ class CwKeyboard:
             return "the radio is transmitting or tuning"
         if s.get("mode") not in ("CW", "CWR"):
             return "the radio is not in a CW mode (CW-U or CW-L)"
-        if self.target() is None:
+        if not self.target_ok:
             return "there is no usable cwdaemon address (a host, and a port from 1024 to 65535)"
         return None
 
@@ -2771,6 +3260,86 @@ class CwKeyboard:
     def on_macro(self, i):
         self.send_text(self.macros[i].get())
 
+    DEVICE_DEFAULTS = {"MIDI straight key": ("20", ""), "MIDI paddles": ("20", "21"),
+                       "Serial straight key": ("DSR", ""), "Serial paddles": ("DSR", "DCD"),
+                       "Vail adapter (paddles)": ("1", "2"), "Vail adapter (its own keyer)": ("0,1,2", "")}
+
+    def device_kind(self):
+        t = self.dev_type.get()
+        return dict(midi="MIDI" in t or "Vail" in t, serial="Serial" in t,
+                    straight="straight" in t or "own keyer" in t)
+
+    def on_device_changed(self, event=None, defaults=True):
+        kind = self.device_kind()
+        if defaults and self.dev_type.get() in self.DEVICE_DEFAULTS:
+            self.dit_var.set(self.DEVICE_DEFAULTS[self.dev_type.get()][0])
+            self.dah_var.set(self.DEVICE_DEFAULTS[self.dev_type.get()][1])
+        word = "line" if kind["serial"] else "note"
+        self.dit_lbl.configure(text="Key " + word if kind["straight"] else "Dit " + word)
+        self.dah_lbl.configure(text="Dah " + word)
+        self.dah_entry.state(["disabled"] if kind["straight"] or not (kind["midi"] or kind["serial"]) else ["!disabled"])
+        self.dit_entry.state(["!disabled"] if (kind["midi"] or kind["serial"]) else ["disabled"])
+        self.refresh_ports()
+
+    def refresh_ports(self):
+        kind = self.device_kind()
+        ports = MidiPaddles.ports() if kind["midi"] else SerialPaddles.ports() if kind["serial"] else []
+        self.port_cb.configure(values=ports)
+        if ports and self.dev_port.get() not in ports and not any(self.dev_port.get() and self.dev_port.get() in x for x in ports):
+            self.dev_port.set(ports[0])
+
+    def start_keyer(self):
+        """Open the chosen device. Called when the window is armed."""
+        self.stop_keyer()
+        kind = self.device_kind()
+        if not (kind["midi"] or kind["serial"]):
+            return True
+        k = self.keyer
+        try:
+            k.mode = self.kmode.get()
+            k.memory_percent = max(0, min(100, int(self.kmem.get() or 33)))
+        except ValueError:
+            return self.refuse("the dit memory must be a number of percent", "Keyer not started") and False
+        k.straight = kind["straight"]
+        k.set_speed(int(round(self.wpm.get())))
+        try:
+            self.sidetone.pitch = int(self.pitch.get() or 600)
+        except ValueError:
+            self.sidetone.pitch = 600
+        self.sidetone.failed = False                      # a new arming deserves a fresh try
+        if self.tone_on.get() and not self.sidetone.start() and self.sidetone.error:
+            self.panel.append_log(f"CW key: {self.sidetone.error}")
+        try:
+            if kind["midi"]:
+                split = lambda text: [int(x) for x in re.split(r"[,\s]+", text.strip()) if x]
+                self.source = MidiPaddles(k, split(self.dit_var.get()), [] if kind["straight"] else split(self.dah_var.get()))
+                self.source.open(self.dev_port.get().strip())
+            else:
+                self.source = SerialPaddles(k, self.dev_port.get().strip(), self.dit_var.get().strip() or "DSR",
+                                            self.dah_var.get().strip() or "DCD", straight=kind["straight"])
+        except Exception as exc:
+            self.source = None
+            self.refuse(str(exc) or type(exc).__name__, "Device not opened")
+            return False
+        self.panel.append_log(f"CW key: {self.dev_type.get()} on {self.dev_port.get()}, "
+                              f"{'straight key' if k.straight else k.mode}")
+        return True
+
+    def stop_keyer(self):
+        if self.source is not None:
+            try:
+                self.source.close()
+            except Exception:
+                pass
+            self.source = None
+        self.keyer.abort()                                # releases, clears what is already scheduled in the daemon
+        self.sidetone.stop()
+
+    def _refused_from_thread(self, why):
+        """A paddle was refused (this runs on the paddle's thread: no Tk here)."""
+        self.pending_status = f"Not keyed: {why}."
+        self.panel.logq.put(f"CW key: not keyed: {why}")
+
     def key_target(self):
         host = self.target()
         try:
@@ -2789,7 +3358,11 @@ class CwKeyboard:
             self.sender.arm()
             self.status.set(f"Armed: sending a heartbeat to {target[0]}:{target[1]} every 100 ms.")
             self.panel.append_log(f"CW key: armed, keying daemon at {target[0]}:{target[1]}")
+            if not self.start_keyer():
+                self.armed_var.set(False)
+                self.sender.disarm()
         else:
+            self.stop_keyer()
             self.sender.disarm()
             self.status.set("Not armed.")
             self.panel.append_log("CW key: disarmed")
@@ -2811,14 +3384,18 @@ class CwKeyboard:
             self.status.set("Armed now. The first element is best when you arm a moment before keying.")
         self.sender.set_target(target)
         self.sender.edge(True)
+        if self.tone_on.get() and self.sidetone.start():
+            self.sidetone.key(True)
         return None
 
     def on_key_release(self, event=None):
         if self.sender.down:
             self.sender.edge(False)
+        self.sidetone.key(False)
         return None
 
     def on_abort(self):
+        self.keyer.abort()                            # the burst, the sidetone and the key at the radio, at once
         self.sender.abort()                           # the key lets go at once, and whatever was pending is forgotten
         target = self.target()
         if target is None:
@@ -2829,6 +3406,10 @@ class CwKeyboard:
 
     def refresh(self, now):
         """Called often while the window is showing."""
+        self.target_ok = self.target() is not None
+        if self.pending_status:
+            self.status.set(self.pending_status)
+            self.pending_status = None
         if self.sender.down and not self.panel.radio.connected:
             self.sender.abort()                       # the radio is gone: never leave the key down
             self.status.set("Key released: the connection to the radio was lost.")
@@ -2897,14 +3478,16 @@ class CwWindow:
         self.hide() if self.visible() else self.show()
 
     def refresh(self):
-        """Called by the panel's periodic update, whatever tab is showing."""
-        if self.visible():
-            self.kb.refresh(time.monotonic())
+        """Called by the panel's periodic update, whatever tab is showing and whether or not this window is:
+        a key that is armed must still be watched (the radio's connection, the daemon's replies)."""
+        self.kb.refresh(time.monotonic())
 
     def shutdown(self):
         """The panel is closing: a message that is being keyed must stop, as PTT lets go."""
         if self.kb.link.waiting or self.kb.sender.armed or self.kb.sender.down:
             self.kb.on_abort()
+        self.kb.stop_keyer()
+        self.kb.keyer.close()
         self.kb.sender.close()
 
     def settings(self):
@@ -6100,6 +6683,18 @@ def run_selftest(path):
         return "not next to this file (fine when it is run on its own)"
 
     check("licence files", licences)
+
+    def paddles():
+        found = []
+        for module, what in (("serial", "pyserial (serial paddles)"), ("rtmidi", "python-rtmidi (MIDI paddles)")):
+            try:
+                __import__(module)
+                found.append(what)
+            except Exception as exc:
+                need(not getattr(sys, "frozen", False), f"{what} is not inside the packaged program: {exc}")
+        return ", ".join(found) if found else "not installed (fine when run from source: paddles are off)"
+
+    check("paddle libraries", paddles)
     text = "\n".join(f"{status} {name}: {detail}" for status, name, detail in rows) + "\n"
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)

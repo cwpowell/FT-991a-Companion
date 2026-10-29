@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.4.0
+
+- **A keyer, for paddles and keys.** The CW window has a new **Paddle or key** box. Choose a device:
+  **MIDI straight key**, **MIDI paddles**, **Serial straight key**, **Serial paddles**, **Vail adapter
+  (paddles)** (the adapter in its passthrough mode: notes 1 and 2 are the paddles) or **Vail adapter (its
+  own keyer)** (the adapter keys by itself and any of its notes 0, 1 and 2 is the key). Then pick its port,
+  the notes (MIDI, defaults 20 and 21) or lines (serial: CTS, DSR, DCD or RI, defaults DSR for dit and DCD
+  for dah), the mode (**Iambic B** or **Iambic A**) and the dit memory (33%), and tick **Arm**. There is
+  a sidetone with its own pitch. Ultimatic is not offered.
+  - **Derived from W7DA's keyer.** The iambic decision logic, the use of a MIDI device's own timing and
+    clock, and the reading of serial paddle lines come from K4-Companion by Dale Farnsworth, W7DA
+    (GPL-3.0-or-later, used with his permission), rewritten for this program: the elements go to the keying
+    daemon, where K4-Companion sends them to a K4. His notice is on that section and in `NOTICE.md`.
+  - **How it works.** Each element is chosen just before it is due, and both its edges (down and up) are sent
+    to the daemon at once, stamped with their true times, so the daemon replays them 150 ms later with
+    exactly the spacing the keyer meant. A straight key's edges go straight through.
+  - **MIDI** (python-rtmidi): a note on is a key down whatever its velocity (the device uses the velocity
+    for its own timing), the device's clock is rebuilt from that timing so that a stalled computer does not
+    distort the keying, and a gap of a second or more is taken afresh.
+  - **Serial** (pyserial): the lines are read every millisecond; how they stand when the port opens is where
+    they rest, so a paddle line must rest low, and a straight key is debounced for 20 ms.
+  - **It refuses to key** unless the radio is connected and in CW-U or CW-L, is not calibrating the noise
+    reduction, and is not transmitting for another reason. This is checked from the paddle's own thread
+    without touching the window (a first version did, and crashed the paddle reader on its first press: the
+    tests found it).
+  - **The key is let go** on Abort, when the device is closed or disarmed (which also clears what the
+    keyer had already scheduled in the daemon), when the connection to the radio is lost (watched even
+    while the CW window is hidden), and when the panel closes.
+  - Measured with simulated devices through the real sender, UDP and the daemon: the spacing at the line
+    matched what the keyer meant to within 0.5 ms, every edge was played a fixed 149 ms after it was meant,
+    and a MIDI straight key held 120 and 126 ms came out as 120 and 126 ms.
+- The installers now contain pyserial and python-rtmidi; the self-test checks that they are inside, and
+  their licences are in `THIRD-PARTY-LICENSES.txt`.
+- A sidetone that cannot start (no sound library) is no longer retried on every key press, which had
+  delayed the test key's timing by tens of milliseconds.
+- `tests/test-keyer.py` and `tests/test-keyer-chain.py` test the keyer without a radio. They need pyserial.
+- **Not yet tried on real devices:** a HaliKey MIDI, a Vail adapter or a HaliKey serial key. The MIDI note
+  numbers and the serial lines are W7DA's defaults and can be changed in the box.
+
 ## 1.3.0
 
 - **The CW window can key the radio through the keying daemon.** A new **Key** row has **Arm**, the

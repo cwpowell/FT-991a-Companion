@@ -22,10 +22,14 @@ tag holds the source that was built into the installers of that release.
 
 ## Credits
 
-- Dale Farnsworth, W7DA, wrote K4-Companion (Copyright (C) 2025, GPL-3.0-or-later), which grew out of
-  K4Macro-Python by Charles W. Powell, NK8O. Dale has given permission for his code to be used in this
-  project. **No code from K4-Companion is in this program yet.** When some is added, the file that
-  contains it will keep his copyright notice in its header, and it will be listed here.
+- **K4-Companion** by Dale Farnsworth, W7DA (Copyright (C) 2025, GPL-3.0-or-later), which grew out of
+  K4Macro-Python by Charles W. Powell, NK8O, is used with Dale's permission. **The keyer section of
+  `ft991a-panel.py`** (from the comment "the keyer: paddles and keys become key-down and key-up edges") is
+  derived from it: the iambic A and B decision logic (`Keyer.choose_element` and `paddle_timestamps`), the way
+  a MIDI paddle's own timing and clock are used (`MidiPaddles`), and the way serial paddle lines are read
+  (`SerialPaddles`). They were rewritten for this program, which sends its elements to a keying daemon where
+  K4-Companion sends them to a K4, and uses a simpler sidetone. Dale's copyright notice stays on that
+  section, as the GPL requires.
 - On the Keyboard page the Morse keying is done by **cwdaemon**, a separate program that the panel
   talks to over the network (<https://github.com/acerion/cwdaemon>, GPL-2.0-or-later, originally by
   Joop Stakenborg, PA4TU). It is not part of this program and is not included in the installers.
@@ -33,7 +37,7 @@ tag holds the source that was built into the installers of that release.
 
 ## Software in the installers
 
-The installers and packaged programs contain Python, Tcl/Tk, numpy, sounddevice, PortAudio, opuslib and
-the Opus codec, and were built with PyInstaller. Their licences, and where to find their source, are in
+The installers and packaged programs contain Python, Tcl/Tk, numpy, sounddevice, PortAudio, opuslib, the
+Opus codec, pyserial and python-rtmidi (with RtMidi), and were built with PyInstaller. Their licences, and where to find their source, are in
 `THIRD-PARTY-LICENSES.txt`. The packaged program has all three files inside it: run it with `--license`
 to see where they are.

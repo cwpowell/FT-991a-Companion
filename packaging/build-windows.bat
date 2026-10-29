@@ -38,7 +38,7 @@ if not exist build mkdir build
 python -m venv build\venv || exit /b 1
 call build\venv\Scripts\activate.bat
 python -m pip install --quiet --upgrade pip || exit /b 1
-python -m pip install --quiet pyinstaller sounddevice opuslib numpy || exit /b 1
+python -m pip install --quiet pyinstaller sounddevice opuslib numpy pyserial python-rtmidi || exit /b 1
 
 rem 2. the program
 if exist dist\FT-991A-Panel.exe del dist\FT-991A-Panel.exe
