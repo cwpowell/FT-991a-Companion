@@ -49,8 +49,11 @@ Environment=PYTHONUNBUFFERED=1
 #           daemon is reachable only over the tailnet. It has no password of its own; --token adds a number
 #           that packets must carry, and --allow limits the addresses that may key the radio.
 #
-# On the radio set menu 060 PC KEYING to DTR. Only one program can own the serial port, so stop cwdaemon
-# if it is running: this daemon understands cwdaemon's text commands on the same UDP port (6789).
+# On the radio set menu 060 PC KEYING to DTR, and menu 012 KEYER TYPE to OFF (otherwise the radio's own keyer
+# answers a held key line with a string of dits). Only one program can own the serial port, so STOP cwdaemon:
+# this daemon understands cwdaemon's text commands on the same UDP port (6789) and replaces it. It does NOT need
+# sudo: being in the dialout group is enough. If the port is already in use, or cwdaemon holds UDP port 6789,
+# it says so and stops, instead of sharing.
 #
 # The key is let go when the service stops, and also when packets stop arriving while it is down
 # (--dead-man), when it has been down too long (--max-down), and on an abort.

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.4.1
+
+Fixes from the first tries on real devices (HaliKey serial, HaliKey MIDI, a Vail adapter, and the daemon on a
+radio's computer).
+
+- **The Vail adapter is set up when you arm.** Left alone it sits in keyboard mode: it keys and sounds its own
+  sidetone but sends the program no MIDI, which is what happened. As K4-Companion does, the panel now opens the
+  adapter's MIDI output and sends MIDI mode, its sidetone pitch, its speed and its keyer mode (passthrough for
+  **Vail adapter (paddles)**, or iambic A or B for **Vail adapter (its own keyer)**), and sends the new speed
+  when the speed slider moves. A HaliKey MIDI is Vail-compatible and is probably set up the same way.
+- **A Monitor button** shows which MIDI note or serial line moves when a key is pressed, and keys nothing, so that
+  a device can be set up by looking at it instead of guessing. For a Vail adapter it also sends the set-up.
+- **A serial key is closed when its line differs from how it stood when the port opened**, whichever way that is.
+  The first version assumed a closed key raises a line, so a line that rests high gave no key-down on a press
+  and a key-down (with no key-up) on the release: no sidetone on the press, then a string of dits. Arm with the
+  key open.
+- **A paddle held for 30 s without a break is let go** (it is taken to be stuck).
+- **The keying daemon no longer shares a UDP port** with another program. It set `SO_REUSEADDR`, which on Linux lets
+  two programs (a second keying daemon, or cwdaemon on 6789) bind the same port with no error and split the
+  packets. A busy port is now an error with a plain message, and so is a serial port another program holds.
+- **`--verbose` works on a real serial line**, saying every key change and who made it (`events` or `text`), and
+  the daemon announces the first packet from each sender. This tells a daemon fault from the radio's own keyer.
+- `keying-daemon.service` and the README now say how the daemon and cwdaemon fit together (it replaces cwdaemon),
+  that no `sudo` is needed (the `dialout` group is enough), and that menu 012 KEYER TYPE must be OFF.
+- Still unverified on the real devices: the notes a HaliKey MIDI sends, and which serial lines a HaliKey serial key
+  uses (use Monitor to find out, then set them in the box).
+
 ## 1.4.0
 
 - **A keyer, for paddles and keys.** The CW window has a new **Paddle or key** box. Choose a device:

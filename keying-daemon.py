@@ -138,10 +138,15 @@ class SerialKeyLine:
         self.line = line.lower()
         if self.line not in ("dtr", "rts"):
             raise ValueError("the line must be dtr or rts")
-        self.ser = serial.serial_for_url(device, do_not_open=True)
+        self.ser = serial.serial_for_url(device, do_not_open=True, exclusive=True)
         self.ser.dtr = False                    # these are applied when the port is opened
         self.ser.rts = False
-        self.ser.open()
+        try:
+            self.ser.open()
+        except (serial.SerialException, OSError) as exc:
+            raise SystemExit(f"cannot open {device}: {exc}\nIs another program using it? A second keying daemon "
+                             f"or cwdaemon on the same serial port will conflict: stop it first. If the message "
+                             f"says permission denied, your user must be in the dialout group (see keying-daemon.service).")
         self.state = False
         self.set(False)
 
@@ -160,9 +165,10 @@ class Engine:
     """Plays timed key events on a line. Events from the network are held for the jitter buffer; text
     is timed locally. A safety loop lets the key go if anything looks wrong."""
 
-    def __init__(self, line, buffer_s=0.15, max_down=3.0, dead_man=0.8, log=None):
+    def __init__(self, line, buffer_s=0.15, max_down=3.0, dead_man=0.8, log=None, verbose=False):
         self.line, self.buffer, self.max_down, self.dead_man = line, buffer_s, max_down, dead_man
         self.log = log or (lambda msg: None)
+        self.verbose = verbose
         self.cv = threading.Condition()
         self.queue, self.counter = [], itertools.count()
         self.down_since, self.held_by = None, None          # when the key went down, and who put it down
@@ -184,6 +190,8 @@ class Engine:
         self.line.set(state)
         self.down_since = time.perf_counter() if state else None
         self.held_by = source if state else None
+        if self.verbose:
+            self.log(f"key {'DOWN' if state else 'up'} ({source})")
 
     def _force_up(self, why):
         if self.line.state:
@@ -348,11 +356,13 @@ class EventListener(threading.Thread):
         super().__init__(daemon=True)
         self.engine, self.token, self.allow, self.log = engine, token, allow, log or (lambda m: None)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # No SO_REUSEADDR: on Linux that would let two programs (a second keying daemon, or cwdaemon) share one
+        # UDP port without any error and split the packets between them. A busy port must be an error.
         self.sock.bind((host, port))
         self.port = self.sock.getsockname()[1]
         self.sock.settimeout(0.2)
         self.stopping = False
+        self.seen = set()
 
     def parse(self, data):
         """Returns (type, sender's clock, events) or None for a packet that is not ours or is damaged."""
@@ -379,6 +389,9 @@ class EventListener(threading.Thread):
             if self.allow and addr[0] not in self.allow:
                 self.engine.stats["bad"] += 1
                 continue
+            if addr not in self.seen:
+                self.seen.add(addr)
+                self.log(f"key events from {addr[0]}:{addr[1]}")
             parsed = self.parse(data)
             if parsed is None:
                 self.engine.stats["bad"] += 1
@@ -404,7 +417,8 @@ class TextListener(threading.Thread):
         self.engine, self.default_wpm, self.wpm, self.allow = engine, wpm, wpm, allow
         self.reply_token = None
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # No SO_REUSEADDR: on Linux that would let two programs (a second keying daemon, or cwdaemon) share one
+        # UDP port without any error and split the packets between them. A busy port must be an error.
         self.sock.bind((host, port))
         self.port = self.sock.getsockname()[1]
         self.sock.settimeout(0.2)
@@ -473,15 +487,22 @@ def main(argv=None):
         ap.error("give --device (or --null to try it without a serial port)")
     allow = {x.strip() for x in a.allow.split(",") if x.strip()} or None
     say = (lambda m: print(time.strftime("%H:%M:%S"), m, flush=True))
-    line = NullKeyLine(verbose=a.verbose) if a.null else SerialKeyLine(a.device, a.line)
-    engine = Engine(line, a.buffer_ms / 1000, a.max_down, a.dead_man, log=say)
-    listeners = [EventListener(engine, a.bind, a.port, a.token, allow, say)]
-    if a.text_port:
-        listeners.append(TextListener(engine, a.bind, a.text_port, a.wpm, allow))
+    line = NullKeyLine() if a.null else SerialKeyLine(a.device, a.line)
+    engine = Engine(line, a.buffer_ms / 1000, a.max_down, a.dead_man, log=say, verbose=a.verbose)
+    try:
+        listeners = [EventListener(engine, a.bind, a.port, a.token, allow, say)]
+        if a.text_port:
+            listeners.append(TextListener(engine, a.bind, a.text_port, a.wpm, allow))
+    except OSError as exc:
+        engine.shutdown()
+        raise SystemExit(f"cannot listen on UDP: {exc}\nIs another keying daemon, or cwdaemon, using port "
+                         f"{a.port} or {a.text_port}? Stop it first (cwdaemon and this daemon cannot share a serial "
+                         f"port, and the text port 6789 is cwdaemon's).")
     for t in listeners:
         t.start()
-    say(f"keying on {'nothing (--null)' if a.null else a.device + ' ' + a.line.upper()}; "
-        f"events on UDP {a.port}, text on UDP {a.text_port or 'off'}, buffer {a.buffer_ms} ms")
+    say(f"keying on {'nothing (--null)' if a.null else a.device + ' ' + a.line.upper()} (the line is LOW: key up); "
+        f"events on UDP {a.port}, text on UDP {a.text_port or 'off'}, buffer {a.buffer_ms} ms"
+        + ("" if a.verbose else "; add --verbose to see every key change"))
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())

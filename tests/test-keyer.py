@@ -118,11 +118,54 @@ import serial
 def loop(): return serial.serial_for_url("loop://", do_not_open=False)
 port = loop(); port.dtr = True; port.rts = True                      # both lines asserted at rest
 cap = Cap(); sp = fp.SerialPaddles(cap, port, "DSR", "CTS"); time.sleep(0.2)
-print("   lines asserted when the port opens are the resting state, not a press:", ok(cap.ev == []))
+print("   lines as they stand when the port opens are the resting state, not a press:", ok(cap.ev == []))
 port.dtr = False; time.sleep(0.05); port.dtr = True; time.sleep(0.05); port.rts = False; time.sleep(0.05); port.rts = True; time.sleep(0.1)
-print("   changes are reported:", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_UP, fp.DIT_DOWN, fp.DAH_UP, fp.DAH_DOWN]))
+print("   this port RESTS HIGH, so a line pulled low is a key closing (and back high, opening):", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_DOWN, fp.DIT_UP, fp.DAH_DOWN, fp.DAH_UP]))
 gaps = [round((cap.ev[i + 1][1] - cap.ev[i][1]) * 1000) for i in range(3)]; print("   spacing of those changes (ms, wanted about 50):", gaps, ok(all(40 <= g <= 70 for g in gaps))); sp.close()
 port = loop(); cap = Cap(); sp = fp.SerialPaddles(cap, port, "DSR", "CTS", straight=True); time.sleep(0.1)
-port.dtr = True; time.sleep(0.004); port.dtr = False; time.sleep(0.004); port.dtr = True; time.sleep(0.15)
-print("   a straight key that bounces (down, up, down within 8 ms) is one key down:", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_DOWN]))
-port.dtr = False; time.sleep(0.15); print("   and its release:", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_DOWN, fp.DIT_UP])); sp.close()
+port.dtr = False; time.sleep(0.004); port.dtr = True; time.sleep(0.004); port.dtr = False; time.sleep(0.15)
+print("   a straight key that bounces (closed, open, closed within 8 ms) is one key down:", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_DOWN]))
+port.dtr = True; time.sleep(0.15); print("   and its release:", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_DOWN, fp.DIT_UP])); sp.close()
+port = serial.serial_for_url("loop://"); port.dtr = False; port.rts = False; cap = Cap(); sp = fp.SerialPaddles(cap, port, "DSR", "CTS"); time.sleep(0.1)
+port.dtr = True; time.sleep(0.05); port.dtr = False; time.sleep(0.1)
+print("   a port that RESTS LOW works the other way, and just as well:", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_DOWN, fp.DIT_UP])); sp.close()
+
+print("--- 6. the Monitor: it reports what a device sends, and keys nothing")
+reports = []
+port = serial.serial_for_url("loop://"); port.dtr = False; port.rts = True
+mon = fp.DeviceMonitor(reports.append); mon.start_serial(port); time.sleep(0.05)
+print("   at the start it tells where the four lines rest:", reports[0][:95], ok("DSR off" in reports[0] and "CTS ON" in reports[0]))
+port.dtr = True; time.sleep(0.03); port.rts = False; time.sleep(0.03); mon.stop()
+print("   then every change:", [r.split("   ")[0] for r in reports[1:]], ok([r.split("   ")[0] for r in reports[1:]] == ["Serial: DSR ON", "Serial: CTS off"]))
+print("   MIDI messages are described in words:", fp.DeviceMonitor.describe_midi([0x90, 21, 7]), "|", fp.DeviceMonitor.describe_midi([0x80, 20, 0]), "|", fp.DeviceMonitor.describe_midi([0xB0, 1, 30]), "|", fp.DeviceMonitor.describe_midi([0xC0, 8]), ok(fp.DeviceMonitor.describe_midi([0x90, 21, 7]) == "note ON  note 21 velocity 7"))
+reports = []; mon = fp.DeviceMonitor(reports.append); mon._midi(([0x90, 2, 5], 0.012), None)
+print("   a MIDI message as the library delivers it:", reports, ok("note ON  note 2 velocity 5" in reports[0] and "12 ms" in reports[0]))
+
+print("--- 7. the Vail adapter is told to use MIDI mode (without that it sends keystrokes and nothing reaches the program)")
+import rtmidi
+sent_by_fake = []
+class FakeOut:
+    def get_ports(self): return ["Other MIDI 1", "Vail Adapter MIDI 1", "Vail Adapter MIDI 2"]
+    def open_port(self, i): sent_by_fake.append(("open", i))
+    def send_message(self, m): sent_by_fake.append(list(m))
+    def close_port(self): sent_by_fake.append("closed")
+real_out = rtmidi.MidiOut; rtmidi.MidiOut = FakeOut
+v = fp.VailAdapterOut(); v.open("Vail Adapter MIDI 1")
+print("   the output port with the best matching name was opened:", sent_by_fake[0], ok(sent_by_fake[0] == ("open", 1)))
+v.set_state(20, 600, "Passthrough")
+print("   set-up at 20 wpm, 600 Hz, passthrough:", sent_by_fake[1:], ok(sent_by_fake[1:] == [[0xB0, 0, 0], [0xB0, 2, 74], [0xB0, 1, 30], [0xC0, 0]]))
+del sent_by_fake[:]; v.set_state(30, 700, "Iambic B"); print("   its own keyer, iambic B at 30 wpm, 700 Hz:", sent_by_fake, ok(sent_by_fake == [[0xB0, 0, 0], [0xB0, 2, 77], [0xB0, 1, 20], [0xC0, 8]]))
+del sent_by_fake[:]; v.set_speed(40); print("   a new speed (40 wpm):", sent_by_fake, ok(sent_by_fake == [[0xB0, 1, 15]]))
+v.close(); rtmidi.MidiOut = real_out
+try: fp.VailAdapterOut().open("Nothing like it") if False else None
+except Exception: pass
+rtmidi.MidiOut = FakeOut
+try: fp.VailAdapterOut().open("Zzz"); print("   no matching output port: WRONG")
+except RuntimeError as e: print("   no matching output port says so:", str(e)[:70], "OK")
+rtmidi.MidiOut = real_out
+
+print("--- 8. a paddle held for far too long is let go")
+snd, tone = FakeSender(), FakeTone(); fp.MAX_BURST = 0.5; k = fp.Keyer(snd, tone); k.set_speed(40); said = []; k.log = said.append
+k.paddle(D); time.sleep(1.2); edges = len(snd.edges); time.sleep(0.4)
+print("   after 0.5 s (the limit set for this test) the keyer stopped on its own:", "edges", edges, "->", len(snd.edges), "| abort sent:", snd.aborts >= 1, "|", [m[:60] for m in said], ok(len(snd.edges) == edges and snd.aborts >= 1 and any("stuck" in m for m in said)))
+fp.MAX_BURST = 30.0; k.close()

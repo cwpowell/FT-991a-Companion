@@ -117,6 +117,17 @@ print("   the right token is accepted (key went down), and the abort lets it go:
 eng, line, logs = new(); lst = kd.EventListener(eng, "127.0.0.1", 0, allow={"10.9.9.9"}); lst.start(); s.sendto(packet(kd.T_EVENTS, [(0, True)]), ("127.0.0.1", lst.port)); time.sleep(0.5)
 print("   an address that is not on the allow-list is ignored:", ok(not line.log)); lst.stop(); eng.shutdown(); s.close()
 
+print("   two daemons cannot share a port any more (cwdaemon on 6789, or an old instance):")
+eng, line, logs = new(); a = kd.EventListener(eng, "127.0.0.1", 0)
+try: kd.EventListener(eng, "127.0.0.1", a.port); print("      the second one bound to the same port: WRONG")
+except OSError as exc: print("      the second one failed:", exc, "OK")
+a.stop(); eng.shutdown()
+print("   --verbose says every key change and who made it:")
+vl = []; eng = kd.Engine(kd.NullKeyLine(), 0.05, log=vl.append, verbose=True); eng.text("E", 60); time.sleep(0.4); eng.shutdown()
+print("      ", vl, ok(vl == ["key DOWN (text)", "key up (text)"]))
+eng2 = kd.Engine(kd.NullKeyLine(), 0.05, log=vl.append); lst2 = kd.EventListener(eng2, "127.0.0.1", 0, 0, None, vl.append); lst2.start(); s2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s2.sendto(packet(kd.T_PING, []), ("127.0.0.1", lst2.port)); time.sleep(0.3)
+print("   the first packet from a new sender is announced:", [m for m in vl if "key events from" in m], ok(any("key events from 127.0.0.1" in m for m in vl))); lst2.stop(); s2.close(); eng2.shutdown()
+
 print("--- 6. cwdaemon-style text over UDP")
 eng, line, logs = new(); tl = kd.TextListener(eng, "127.0.0.1", 0, wpm=24); tl.start(); c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); c.settimeout(3); d = ("127.0.0.1", tl.port)
 c.sendto(b"\x1b260", d); c.sendto(b"\x1bhDONE", d); t0 = time.perf_counter(); c.sendto(b"E T", d)

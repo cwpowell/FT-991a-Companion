@@ -180,6 +180,43 @@ You can also build on your own computer: `bash packaging/build-macos.sh` or
 
 The server and the panel speak the same audio protocol, so either can be updated on its own.
 
+## Keying CW from the panel
+
+The CW window can send text (through `cwdaemon`, or through `keying-daemon.py`, which understands the same
+text commands) and can key the radio from a key or paddles, with the timing kept exactly. Both need a small
+program on **the radio's computer** that owns the radio's **second USB serial port**.
+
+**One program owns that port: `keying-daemon.py` replaces `cwdaemon`; do not run both.** They conflict over the
+serial port and over UDP port 6789. `keying-daemon.py` answers cwdaemon's text commands on port 6789, so the CW
+window's text box works unchanged, and it also takes timestamped key events on port 6790.
+
+1. **Stop cwdaemon:** `sudo systemctl stop cwdaemon` or `sudo pkill cwdaemon`.
+2. **Let your user open the serial port, so that nothing needs `sudo`:**
+   `sudo usermod -aG dialout $USER`, then log out and in again. Check with `ls -l /dev/ttyUSB1` and `groups`.
+   Use the stable name from `ls /dev/serial/by-id` for the port.
+3. **On the radio:** menu **060 PC KEYING = DTR**, menu **012 KEYER TYPE = OFF** (the radio's own keyer would
+   answer a held key line with a string of dits), menu 033 CAT RTS = DISABLE, and a CW mode (CW-U or CW-L).
+4. **Install and start the daemon** on the radio's computer (`pip install pyserial`):
+   `python3 keying-daemon.py --device /dev/serial/by-id/YOUR-PORT --bind YOUR-TAILSCALE-ADDRESS --verbose`
+   (`--verbose` prints every key change and who asked for it; `keying-daemon.service` runs it in the
+   background). It says what is wrong, and stops, if the serial port or a UDP port is already in use.
+   Try it first without the radio: add `--null` instead of `--device`.
+5. **In the CW window:** type the radio's computer in the address box (the text port stays 6789 and the
+   daemon port 6790), tick **Arm**, and try the **Test key** on a dummy load.
+
+**Paddles and keys.** Choose a device in the **Paddle or key** box, pick its port, and press **Monitor**: it shows
+which note or serial line moves when you press the key, and keys nothing. Set the notes or lines to what it shows,
+press Monitor again to stop, then tick **Arm**.
+- A **Vail adapter**, and probably a **HaliKey MIDI** (it is Vail-compatible), must be told to use MIDI mode. Choose
+  **Vail adapter (paddles)**: the panel sends that, and the speed and pitch, when you arm (without it the adapter
+  keys and sounds its own sidetone but sends the program nothing). Its notes are 1 and 2.
+- A **serial** key or paddles: a key is closed when its line differs from how it stood when you armed, so arm with
+  the key open.
+
+**If the radio sends a string of dits**, run the daemon with `--verbose`. If it prints `key DOWN` and `key up`
+again and again, the cause is on the panel's side: disarm, and use Monitor to check the device. If it prints
+nothing while the radio sends dits, the radio's own keyer is answering the line: set menu 012 KEYER TYPE to OFF.
+
 ## Safety
 
 - The panel can transmit (PTT, and the tuner's tuning carrier) and it changes radio settings.
