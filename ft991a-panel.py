@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.4.1"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.4.3"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -2873,6 +2873,94 @@ class Keyer:
         self.release()
 
 
+def rtmidi_probe(path):
+    """Run in a separate process (--rtmidi-probe FILE): ask python-rtmidi for the MIDI ports and write them to FILE.
+    If the library crashes, only this process dies."""
+    import rtmidi
+    data = {"in": rtmidi.MidiIn().get_ports(), "out": rtmidi.MidiOut().get_ports()}
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+    return 0
+
+
+class MidiSupport:
+    """python-rtmidi is a native library. When it misbehaves it kills the whole program, and Python cannot catch
+    that: on one Mac, with Python 3.14, it did so before the window had opened. So the first time MIDI is needed,
+    a separate process asks it for the ports, and only if that works is it used in this process. If it does not,
+    MIDI paddles are off, with the reason, and everything else (serial paddles, the test key, the text) works."""
+    command = None            # a test can replace this: a list, in which "{path}" stands for the result file
+    result = None             # (ok, message, input ports, output ports) once it is known
+    timeout = 20              # seconds the probe may take
+
+    @classmethod
+    def check(cls, force=False):
+        if cls.result is not None and not force:
+            return cls.result
+        import subprocess
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        if cls.command:
+            cmd = [c.replace("{path}", path) for c in cls.command]
+        elif getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--rtmidi-probe", path]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--rtmidi-probe", path]
+        still = "MIDI paddles are off; serial paddles, the test key and the text still work."
+        if sys.version_info >= (3, 14):
+            advice = (f"Python {sys.version_info.major}.{sys.version_info.minor} is very new and python-rtmidi may not "
+                      f"support it yet: try Python 3.12 or 3.13, or pip install --upgrade python-rtmidi. {still}")
+        else:
+            advice = f"Try pip install --upgrade --force-reinstall python-rtmidi. {still}"
+        try:
+            run = subprocess.run(cmd, capture_output=True, text=True, timeout=cls.timeout)
+            data = json.loads(Path(path).read_text(encoding="utf-8") or "null") if run.returncode == 0 else None
+            if data is not None:
+                cls.result = (True, "", list(data.get("in", [])), list(data.get("out", [])))
+            else:
+                tail = (run.stderr.strip().splitlines() or ["no message"])[-1][:140]
+                crashed = run.returncode < 0 or "Fatal Python error" in run.stderr or run.returncode > 128
+                if "No module named" in run.stderr and "rtmidi" in run.stderr:
+                    message = f"python-rtmidi is not installed (pip install python-rtmidi). {still}"
+                elif crashed:                                   # the library killed its process: a bad build for this Python
+                    message = (f"python-rtmidi crashed when asked for the MIDI ports (code {run.returncode}: {tail}). "
+                               f"{advice}")
+                else:                                           # it ran and reported an error: say what it said
+                    message = f"python-rtmidi could not start: {tail}. {still}"
+                cls.result = (False, message, [], [])
+        except subprocess.TimeoutExpired:
+            cls.result = (False, f"python-rtmidi did not answer within {cls.timeout} s. {advice}", [], [])
+        except Exception as exc:
+            cls.result = (False, f"python-rtmidi could not be checked: {exc}. {advice}", [], [])
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return cls.result
+
+    @classmethod
+    def require(cls):
+        ok, message, _in, _out = cls.check()
+        if not ok:
+            raise RuntimeError(message)
+
+
+ALL_MIDI = "(all MIDI inputs)"      # for the Monitor: listen to every MIDI input at once
+
+
+def open_serial_input(device, drive_dtr=False, drive_rts=False):
+    """Open a serial port to READ key lines, without driving an output. Opening a port raises DTR and RTS (Linux does
+    it, and pyserial then leaves them asserted for as long as the port is open), and on an interface whose DTR or
+    RTS reach the transmitter that KEYS IT. So both are set before the port is opened, and stay as chosen: off by
+    default. Some interfaces use them as power for their key inputs; those can be switched on in the window.
+    (On Linux the first open of a port still raises them for a moment before they are dropped.)"""
+    import serial
+    ser = serial.serial_for_url(device, do_not_open=True, rtscts=False, dsrdtr=False)
+    ser.dtr = bool(drive_dtr)
+    ser.rts = bool(drive_rts)
+    ser.open()
+    return ser
+
+
 class VailAdapterOut:
     """The set-up a Vail adapter (and a Vail-compatible HaliKey MIDI) needs. It does not send MIDI notes until it
     is told to use MIDI mode: left alone it sends keyboard keystrokes, and keys and sounds its own sidetone but
@@ -2887,6 +2975,7 @@ class VailAdapterOut:
         self.sent = []
 
     def open(self, devname):
+        MidiSupport.require()
         import rtmidi
         out = rtmidi.MidiOut()
         names = out.get_ports()
@@ -2948,38 +3037,66 @@ class DeviceMonitor:
     def __init__(self, report):
         self.report = report
         self.midiin = self.vail = self.port = None
+        self.midiins = []                      # every MIDI input being listened to
         self._stop = threading.Event()
         self.thread = None
         self.last = time.perf_counter()
+        self.started = time.perf_counter()
+        self.count = 0                         # messages or line changes seen
+        self.notes_seen = []                   # MIDI notes, in the order they first came on
+        self.lines_seen = []
 
     def start_midi(self, port_name, vail=False, wpm=20, pitch=600):
+        MidiSupport.require()
         import rtmidi
-        self.midiin = rtmidi.MidiIn()
-        names = self.midiin.get_ports()
-        self.report(f"Monitor: MIDI input ports found: {names or 'NONE'}")
-        match = [i for i, n in enumerate(names) if n == port_name or (port_name and port_name in n)]
-        if not match:
+        probe = rtmidi.MidiIn()
+        names = probe.get_ports()
+        try:
+            outs = rtmidi.MidiOut().get_ports()
+        except Exception:
+            outs = []
+        self.report(f"Monitor: MIDI input ports found: {names or 'NONE'}; output ports: {outs or 'none'}")
+        if port_name == ALL_MIDI:
+            chosen = list(range(len(names)))
+        else:
+            chosen = [i for i, n in enumerate(names) if n == port_name or (port_name and port_name in n)][:1]
+        if not chosen:
             raise RuntimeError(f"MIDI port '{port_name}' not found; there are {names or 'none'}")
-        self.midiin.open_port(match[0])
-        self.midiin.set_callback(self._midi)
-        self.report(f"Monitor: listening to '{names[match[0]]}'. Press the key or paddles; nothing is keyed.")
+        for i in chosen:
+            midiin = rtmidi.MidiIn()
+            midiin.open_port(i)
+            midiin.set_callback(lambda event, data=None, label=names[i]: self._midi(event, label if len(chosen) > 1 else None))
+            self.midiins.append(midiin)
+        self.midiin = self.midiins[0]
+        self.report("Monitor: listening to " + (", ".join(f"'{names[i]}'" for i in chosen)) +
+                    ". Press the key or paddles; nothing is keyed.")
         if vail:
-            try:
-                self.vail = VailAdapterOut()
-                self.vail.open(names[match[0]])
-                self.vail.set_state(wpm, pitch)
-                self.report("Monitor: told the Vail adapter to use MIDI mode, passthrough.")
-            except Exception as exc:
-                self.report(f"Monitor: could not set up the adapter ({exc}). It may be sending keystrokes, not MIDI.")
+            for i in chosen:
+                if len(chosen) > 1 and "vail" not in names[i].lower():
+                    continue
+                try:
+                    self.vail = VailAdapterOut()
+                    self.vail.open(names[i])
+                    self.vail.set_state(wpm, pitch)
+                    self.report(f"Monitor: told '{names[i]}' to use MIDI mode (passthrough). If nothing arrives, unplug the "
+                                f"adapter, plug it in again, and start the Monitor again.")
+                    break
+                except Exception as exc:
+                    self.vail = None
+                    self.report(f"Monitor: could not set up '{names[i]}' ({exc}). It may be sending keystrokes, not MIDI.")
 
-    def _midi(self, event, data=None):
+    def _midi(self, event, label=None):
         message, delta = event
-        self.report(f"MIDI in: {self.describe_midi(message)}   (device timing {delta * 1000:.0f} ms)")
+        self.count += 1
+        if (message[0] & 0xF0) == 0x90 and len(message) > 1 and message[1] not in self.notes_seen:
+            self.notes_seen.append(message[1])
+        prefix = f"[{label}] " if label else ""
+        self.report(f"MIDI in: {prefix}{self.describe_midi(message)}   (device timing {delta * 1000:.0f} ms)")
 
-    def start_serial(self, device):
-        import serial
-        self.port = device if hasattr(device, "dsr") else serial.serial_for_url(device, rtscts=False, dsrdtr=False)
+    def start_serial(self, device, drive_dtr=False, drive_rts=False):
         self._owned = not hasattr(device, "dsr")
+        self.port = open_serial_input(device, drive_dtr, drive_rts) if self._owned else device
+        self.lines_seen = []                                  # the lines that closed, in the order they first did
         first = self._lines()
         self.report("Monitor: serial lines at rest: " + ", ".join(f"{k} {'ON' if v else 'off'}" for k, v in first.items())
                     + ". Press the key or paddles; each change is reported. A key is closed when its line differs from this.")
@@ -3001,6 +3118,9 @@ class DeviceMonitor:
             for name, value in now.items():
                 if value != self.state[name]:
                     t = time.perf_counter()
+                    self.count += 1
+                    if name not in self.lines_seen:
+                        self.lines_seen.append(name)
                     self.report(f"Serial: {name} {'ON' if value else 'off'}   (+{(t - self.last) * 1000:.0f} ms)")
                     self.last, self.state[name] = t, value
             time.sleep(0.001)
@@ -3009,12 +3129,13 @@ class DeviceMonitor:
         self._stop.set()
         if self.thread is not None:
             self.thread.join(timeout=0.5)
-        if self.midiin is not None:
+        for midiin in self.midiins:
             try:
-                self.midiin.cancel_callback()
-                self.midiin.close_port()
+                midiin.cancel_callback()
+                midiin.close_port()
             except Exception:
                 pass
+        self.midiins = []
         if self.vail is not None:
             self.vail.close()
         if self.port is not None and getattr(self, "_owned", False):
@@ -3036,6 +3157,7 @@ class MidiPaddles:
     def __init__(self, keyer, dit_notes, dah_notes):
         self.keyer, self.dit_notes, self.dah_notes = keyer, list(dit_notes), list(dah_notes)
         self.midiin = None
+        self._hinted = 0.0
         self.delta = 0.0
         self.last_midi_delta = 0.0
         self.device_clock, self.clock_offset = 0.0, None
@@ -3043,13 +3165,11 @@ class MidiPaddles:
 
     @staticmethod
     def ports():
-        try:
-            import rtmidi
-            return rtmidi.MidiIn().get_ports()
-        except Exception:
-            return []
+        ok, _message, ports, _out = MidiSupport.check()
+        return ports if ok else []
 
     def open(self, port_name):
+        MidiSupport.require()
         import rtmidi
         self.midiin = rtmidi.MidiIn()
         names = self.midiin.get_ports()
@@ -3089,6 +3209,13 @@ class MidiPaddles:
             self.delta += velocity / 1000
         timestamp = self.device_timestamp(self.delta) if status in (0x90, 0x80) else None
         keyer = self.keyer
+        if status in (0x90, 0x80) and note not in self.dit_notes and note not in self.dah_notes:
+            if time.perf_counter() - self._hinted > 3.0:       # say it, not too often: it is the commonest reason for no keying
+                self._hinted = time.perf_counter()
+                say = getattr(keyer, "log", None)               # a hint must never be able to break the reader
+                if say:
+                    say(f"keyer: MIDI note {note} is not one of the notes in the box (dit {self.dit_notes}, "
+                        f"dah {self.dah_notes}), so it is ignored. Run Monitor, press the key, then 'Use what was seen'.")
         if status == 0x90:                               # a note on is a key down, whatever its velocity: the
             if note in self.dit_notes:                   # velocity is the device's timing, and 0 means none
                 self.dit_was_down = True
@@ -3122,12 +3249,12 @@ class SerialPaddles:
     line is different from that, whichever way that is: a line that rests low and goes high, or rests high and
     is pulled low, both work. So open the port (arm) with the key open. A straight key is debounced for 20 ms."""
 
-    def __init__(self, keyer, device, dit_signal="DSR", dah_signal="DCD", straight=False):
-        import serial
+    def __init__(self, keyer, device, dit_signal="DSR", dah_signal="DCD", straight=False,
+                 drive_dtr=False, drive_rts=False):
         self.keyer, self.straight = keyer, straight
         self.dit_signal, self.dah_signal = dit_signal.upper(), dah_signal.upper()
         self._owned = not hasattr(device, "dsr")          # a port that is already open is left open
-        self.port = serial.serial_for_url(device, rtscts=False, dsrdtr=False) if self._owned else device
+        self.port = open_serial_input(device, drive_dtr, drive_rts) if self._owned else device
         self._stop = threading.Event()
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -3215,6 +3342,9 @@ class CwKeyboard:
         self.kmem = tk.StringVar(value=str(c.get("kmem", 33)))
         self.tone_on = tk.BooleanVar(value=bool(c.get("tone_on", True)))
         self.pitch = tk.StringVar(value=str(c.get("pitch", 600)))
+        self.drive_dtr = tk.BooleanVar(value=bool(c.get("kdtr", False)))     # serial: drive DTR / RTS (off: opening a
+        self.drive_rts = tk.BooleanVar(value=bool(c.get("krts", False)))     # port must never key anything)
+        self.hinted_silence = False
         self.source = None
         self.vail = None                      # the Vail adapter's MIDI output, while one is armed
         self.monitor = None                   # a DeviceMonitor, while one is running
@@ -3299,27 +3429,33 @@ class CwKeyboard:
         ttk.Checkbutton(kfr, text="Sidetone", variable=self.tone_on).grid(row=4, column=0, columnspan=2, sticky="w")
         ttk.Label(kfr, text="Pitch Hz").grid(row=4, column=2, sticky="e", padx=(8, 3))
         ttk.Entry(kfr, textvariable=self.pitch, width=5).grid(row=4, column=3, sticky="w")
+        ttk.Button(kfr, text="Test tone", style="Compact.TButton", command=self.on_tone).grid(row=4, column=4, padx=(4, 0))
         self.mon_btn = ttk.Button(kfr, text="Monitor", style="Compact.TButton", command=self.on_monitor)
         self.mon_btn.grid(row=5, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(kfr, foreground="#666666", wraplength=330, justify="left",
-                  text="Monitor shows which note or line moves when you press the key. It keys nothing.").grid(
-            row=5, column=1, columnspan=4, sticky="w", padx=(6, 0), pady=(4, 0))
+        self.learn_btn = ttk.Button(kfr, text="Use what was seen", style="Compact.TButton", command=self.on_learn)
+        self.learn_btn.grid(row=5, column=1, columnspan=3, sticky="w", padx=(6, 0), pady=(4, 0))
+        ttk.Label(kfr, foreground="#666666", wraplength=400, justify="left",
+                  text="Monitor keys nothing: press dit, then dah, then Use what was seen.").grid(
+            row=6, column=0, columnspan=5, sticky="w", pady=(2, 0))
+        ttk.Checkbutton(kfr, text="Drive DTR", variable=self.drive_dtr).grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(kfr, text="Drive RTS", variable=self.drive_rts).grid(row=7, column=2, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(kfr, foreground="#666666", wraplength=400, justify="left",
+                  text="Serial only. Off unless the interface needs them for power: they can key a transmitter.").grid(
+            row=8, column=0, columnspan=5, sticky="w")
         for w in (self.dev_cb, self.port_cb):
             for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 w.bind(seq, lambda e: "break")
         ttk.Label(box, textvariable=self.status, foreground="#333333", wraplength=380,
                   justify="left").grid(row=11, column=0, columnspan=5, sticky="w", pady=(4, 0))
         ttk.Label(box, foreground="#666666", wraplength=380, justify="left", text=(
-            "Needs cwdaemon on the radio's computer (cwdaemon -n -d <the radio's second serial port> "
-            "-x n) and the radio's menu 060 PC KEYING set to DTR. In macros, [MYCALL] and [CALL] are "
-            "replaced. Prosigns: * AR, = BT, < SK, ( KN, ! SN, & AS, > BK. + and - are left out. A blank "
-            "address means the radio's computer.")
+            "Needs keying-daemon.py (or cwdaemon) on the radio's computer: see the README. Macros: [MYCALL] and "
+            "[CALL] are replaced. Prosigns: * AR, = BT, < SK, ( KN, ! SN, & AS, > BK. + and - are left out.")
         ).grid(row=12, column=0, columnspan=5, sticky="w", pady=(4, 0))
         self.sidetone = Sidetone(int(self.pitch.get() or 600))
         self.keyer = Keyer(self.sender, self.sidetone, log=self.panel.logq.put)
         self.keyer.gate = self.thread_gate
         self.keyer.on_refused = self._refused_from_thread
-        self.on_device_changed(defaults=not (self.dit_var.get() or self.dah_var.get()))
+        self.on_device_changed(defaults=not (self.dit_var.get() or self.dah_var.get()), refresh=False)   # nothing native at start-up
         self.on_speed()
 
     def settings(self):
@@ -3329,7 +3465,8 @@ class CwKeyboard:
                     cwd_port=self.port.get().strip(), keyd_port=self.keyd_port.get().strip(),
                     keyd_token=self.sender.token, kdev=self.dev_type.get(), kport=self.dev_port.get(),
                     kdit=self.dit_var.get(), kdah=self.dah_var.get(), kmode=self.kmode.get(),
-                    kmem=self.kmem.get(), tone_on=self.tone_on.get(), pitch=self.pitch.get())
+                    kmem=self.kmem.get(), tone_on=self.tone_on.get(), pitch=self.pitch.get(),
+                    kdtr=self.drive_dtr.get(), krts=self.drive_rts.get())
 
     def on_speed(self):
         self.speed_lbl.configure(text=f"{int(round(self.wpm.get()))} wpm")
@@ -3440,7 +3577,7 @@ class CwKeyboard:
         return dict(midi="MIDI" in t or "Vail" in t, serial="Serial" in t,
                     straight="straight" in t or "own keyer" in t)
 
-    def on_device_changed(self, event=None, defaults=True):
+    def on_device_changed(self, event=None, defaults=True, refresh=True):
         if getattr(self, "monitor", None) is not None:
             self.stop_monitor()
         kind = self.device_kind()
@@ -3452,11 +3589,17 @@ class CwKeyboard:
         self.dah_lbl.configure(text="Dah " + word)
         self.dah_entry.state(["disabled"] if kind["straight"] or not (kind["midi"] or kind["serial"]) else ["!disabled"])
         self.dit_entry.state(["!disabled"] if (kind["midi"] or kind["serial"]) else ["disabled"])
-        self.refresh_ports()
+        if refresh:
+            self.refresh_ports()
 
     def refresh_ports(self):
         kind = self.device_kind()
         ports = MidiPaddles.ports() if kind["midi"] else SerialPaddles.ports() if kind["serial"] else []
+        if kind["midi"] and MidiSupport.result is not None and not MidiSupport.result[0]:
+            self.status.set(MidiSupport.result[1])
+            self.panel.append_log("CW key: " + MidiSupport.result[1])
+        if kind["midi"] and ports:
+            ports = list(ports) + [ALL_MIDI]
         self.port_cb.configure(values=ports)
         if ports and self.dev_port.get() not in ports and not any(self.dev_port.get() and self.dev_port.get() in x for x in ports):
             self.dev_port.set(ports[0])
@@ -3482,13 +3625,46 @@ class CwKeyboard:
                 m.start_midi(self.dev_port.get().strip(), vail="Vail" in self.dev_type.get(),
                              wpm=int(round(self.wpm.get())), pitch=int(self.pitch.get() or 600))
             else:
-                m.start_serial(self.dev_port.get().strip())
+                m.start_serial(self.dev_port.get().strip(), drive_dtr=self.drive_dtr.get(), drive_rts=self.drive_rts.get())
         except Exception as exc:
             m.stop()
             return self.refuse(str(exc) or type(exc).__name__, "Monitor not started")
         self.monitor = m
+        self.hinted_silence = False
         self.mon_btn.configure(text="Stop monitor")
         self.status.set("Monitoring: press the key or paddles.")
+
+    def on_learn(self):
+        """Fill in the notes or lines from what the Monitor saw: the first one is dit, the second dah."""
+        m = self.monitor
+        if m is None:
+            return self.refuse("start the Monitor first, press the dit paddle, then the dah paddle", "Nothing to use")
+        kind = self.device_kind()
+        seen = [str(x) for x in (m.notes_seen if kind["midi"] else m.lines_seen)]
+        if not seen:
+            return self.refuse("nothing has been seen yet: press the key or paddles", "Nothing to use")
+        self.dit_var.set(seen[0])
+        if kind["straight"]:
+            self.dah_var.set("")
+        elif len(seen) > 1:
+            self.dah_var.set(seen[1])
+        what = "key" if kind["straight"] else "dit"
+        text = f"{what} = {seen[0]}" + (f", dah = {seen[1]}" if len(seen) > 1 and not kind["straight"] else "")
+        self.status.set(f"Set from what was seen: {text}.")
+        self.panel.append_log(f"CW key: set from what the Monitor saw: {text} (seen in order: {', '.join(seen)})")
+
+    def on_tone(self):
+        """Sound the sidetone for a moment, to find out whether it works, apart from the keying."""
+        try:
+            self.sidetone.pitch = int(self.pitch.get() or 600)
+        except ValueError:
+            self.sidetone.pitch = 600
+        self.sidetone.failed = False                      # the user asked: try again
+        if not self.sidetone.start():
+            return self.refuse(self.sidetone.error or "there is no sound output", "No tone")
+        self.sidetone.key(True)
+        self.panel.root.after(350, lambda: self.sidetone.key(False))
+        self.status.set(f"A {self.sidetone.pitch} Hz tone for a moment. If you heard nothing, check the computer's sound output.")
 
     def stop_monitor(self):
         if self.monitor is not None:
@@ -3504,6 +3680,8 @@ class CwKeyboard:
         if not (kind["midi"] or kind["serial"]):
             return True
         k = self.keyer
+        if kind["midi"] and self.dev_port.get().strip() == ALL_MIDI:
+            return self.refuse(f"'{ALL_MIDI}' is for the Monitor: choose the one port the device is on", "Device not opened") and False
         try:
             k.mode = self.kmode.get()
             k.memory_percent = max(0, min(100, int(self.kmem.get() or 33)))
@@ -3518,6 +3696,7 @@ class CwKeyboard:
         self.sidetone.failed = False                      # a new arming deserves a fresh try
         if self.tone_on.get() and not self.sidetone.start() and self.sidetone.error:
             self.panel.append_log(f"CW key: {self.sidetone.error}")
+            self.status.set(f"{self.sidetone.error}: you will key without a sidetone. Use Test tone to check the sound output.")
         try:
             if kind["midi"]:
                 split = lambda text: [int(x) for x in re.split(r"[,\s]+", text.strip()) if x]
@@ -3525,7 +3704,8 @@ class CwKeyboard:
                 self.source.open(self.dev_port.get().strip())
             else:
                 self.source = SerialPaddles(k, self.dev_port.get().strip(), self.dit_var.get().strip() or "DSR",
-                                            self.dah_var.get().strip() or "DCD", straight=kind["straight"])
+                                            self.dah_var.get().strip() or "DCD", straight=kind["straight"],
+                                            drive_dtr=self.drive_dtr.get(), drive_rts=self.drive_rts.get())
         except Exception as exc:
             self.source = None
             self.refuse(str(exc) or type(exc).__name__, "Device not opened")
@@ -3544,7 +3724,12 @@ class CwKeyboard:
                 self.status.set(f"The Vail adapter could not be set up ({exc}). It may be sending keystrokes, not MIDI.")
                 self.panel.append_log(f"CW key: Vail adapter set-up failed: {exc}")
         self.panel.append_log(f"CW key: {self.dev_type.get()} on {self.dev_port.get()}, "
-                              f"{'straight key' if k.straight else k.mode}")
+                              f"{'straight key' if k.straight else k.mode}; "
+                              f"{'key' if kind['straight'] else 'dit'} {self.dit_var.get() or '-'}"
+                              f"{'' if kind['straight'] else ', dah ' + (self.dah_var.get() or '-')}; "
+                              f"{int(round(self.wpm.get()))} wpm" +
+                              (f"; DTR {'driven' if self.drive_dtr.get() else 'off'}, RTS {'driven' if self.drive_rts.get() else 'off'}"
+                               if kind["serial"] else ""))
         return True
 
     def stop_keyer(self):
@@ -3632,6 +3817,12 @@ class CwKeyboard:
     def refresh(self, now):
         """Called often while the window is showing."""
         self.target_ok = self.target() is not None
+        m = self.monitor
+        if m is not None and m.count == 0 and not self.hinted_silence and time.perf_counter() - m.started > 6.0:
+            self.hinted_silence = True
+            self.pending_status = ("Nothing received yet. Press the key. A Vail adapter or HaliKey MIDI must be in MIDI "
+                                   "mode (unplug it, plug it in, and start the Monitor again), and it may be on another "
+                                   f"port: choose '{ALL_MIDI}' in the Port box to hear all of them.")
         if self.pending_status:
             self.status.set(self.pending_status)
             self.pending_status = None
@@ -6938,12 +7129,15 @@ def main():
     ap.add_argument("--license", nargs="?", const="notice", choices=("notice", "full", "credits", "third-party"),
                     help="show the licence (GNU GPL version 3 or later) and exit; 'full' prints the whole "
                          "GPL, 'credits' the notices, 'third-party' the licences of the included software")
+    ap.add_argument("--rtmidi-probe", metavar="FILE", help=argparse.SUPPRESS)      # used by the panel itself
     ap.add_argument("--save-license", metavar="FOLDER",
                     help="copy the licence files (LICENSE, NOTICE.md, THIRD-PARTY-LICENSES.txt) into FOLDER and exit")
     ap.add_argument("--selftest", metavar="FILE",
                     help="check that Tk, the sound library and Opus are present, write the "
                          "report to FILE and exit (used by the installer builds)")
     args = ap.parse_args()
+    if args.rtmidi_probe:
+        return rtmidi_probe(args.rtmidi_probe)
     if args.license:
         return show_license(args.license)
     if args.save_license:

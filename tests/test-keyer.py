@@ -143,6 +143,7 @@ print("   a MIDI message as the library delivers it:", reports, ok("note ON  not
 
 print("--- 7. the Vail adapter is told to use MIDI mode (without that it sends keystrokes and nothing reaches the program)")
 import rtmidi
+fp.MidiSupport.result = (True, "", [], [])           # as if the probe had passed (these tests use a fake MidiOut)
 sent_by_fake = []
 class FakeOut:
     def get_ports(self): return ["Other MIDI 1", "Vail Adapter MIDI 1", "Vail Adapter MIDI 2"]
@@ -169,3 +170,75 @@ snd, tone = FakeSender(), FakeTone(); fp.MAX_BURST = 0.5; k = fp.Keyer(snd, tone
 k.paddle(D); time.sleep(1.2); edges = len(snd.edges); time.sleep(0.4)
 print("   after 0.5 s (the limit set for this test) the keyer stopped on its own:", "edges", edges, "->", len(snd.edges), "| abort sent:", snd.aborts >= 1, "|", [m[:60] for m in said], ok(len(snd.edges) == edges and snd.aborts >= 1 and any("stuck" in m for m in said)))
 fp.MAX_BURST = 30.0; k.close()
+
+print("--- 9. python-rtmidi is a native library that can kill the whole program: it is only ever asked in a separate process first")
+ABORT = [sys.executable, "-c", "import os; os.abort()"]
+def fresh(command=None, timeout=20): fp.MidiSupport.result = None; fp.MidiSupport.command = command; fp.MidiSupport.timeout = timeout
+fresh(); ok_, msg, pin, pout = fp.MidiSupport.check()
+print("   the real probe (this program run with --rtmidi-probe):", "worked, input ports" if ok_ else "reported", pin if ok_ else msg[:110], ok(ok_ or ("could not start" in msg and "crashed" not in msg)))
+print("   (where the library cannot start, e.g. no ALSA MIDI in a container, the reason is given plainly, with no advice about the Python version)")
+fresh(ABORT); ok_, msg, pin, pout = fp.MidiSupport.check()
+print("   a library that aborts the process (this test is still running, so the crash stayed in the probe):", ok_, ok(ok_ is False and "code" in msg))
+print("      the message:", msg[:150])
+print("   it says what still works, and advises (about the Python version only on 3.14 or later):", ok("serial paddles" in msg and ("pip install" in msg)))
+print("   the port list is simply empty:", fp.MidiPaddles.ports(), ok(fp.MidiPaddles.ports() == []))
+for what, call in (("MidiPaddles.open", lambda: fp.MidiPaddles(Cap(), [20], [21]).open("x")), ("VailAdapterOut.open", lambda: fp.VailAdapterOut().open("x")), ("DeviceMonitor.start_midi", lambda: fp.DeviceMonitor(lambda m: None).start_midi("x"))):
+    try: call(); print(f"   {what}: went ahead: WRONG")
+    except RuntimeError as exc: print(f"   {what}: refused with the reason: OK ({str(exc)[:55]}...)")
+fresh([sys.executable, "-c", "import rtmidi_that_is_not_there"]); ok_, msg, _a, _b = fp.MidiSupport.check()
+print("   a library that is not installed says so:", msg[:80], ok(not ok_ and "not installed" in msg))
+fresh([sys.executable, "-c", "import time; time.sleep(5)"], timeout=1); t0 = time.time(); ok_, msg, _a, _b = fp.MidiSupport.check()
+print(f"   a probe that hangs is given up on after {time.time() - t0:.1f} s:", msg[:60], ok(not ok_ and time.time() - t0 < 3))
+fresh(); fp.MidiSupport.check(); print("   and the real probe gives an answer again afterwards:", ok(fp.MidiSupport.result is not None))
+
+print("--- 10. reading a key must never drive an output line (opening a port raised DTR and RTS, which keyed a transmitter)")
+import serial
+p = fp.open_serial_input("loop://")
+print("   a port opened to read: DTR", p.dtr, "RTS", p.rts, ok(p.dtr is False and p.rts is False)); p.close()
+p = fp.open_serial_input("loop://", drive_dtr=True, drive_rts=False)
+print("   with 'drive DTR' switched on, for an interface that needs it for power: DTR", p.dtr, "RTS", p.rts, ok(p.dtr is True and p.rts is False)); p.close()
+cap = Cap(); sp = fp.SerialPaddles(cap, "loop://", "DSR", "CTS"); time.sleep(0.15)
+print("   the paddle reader opens its own port with both low, and keeps them low while it reads:", sp.port.dtr, sp.port.rts, ok(sp.port.dtr is False and sp.port.rts is False))
+sp.port.dtr = True; time.sleep(0.05); sp.port.dtr = False; time.sleep(0.1)
+print("   (a port that rests LOW: the line going high is a key closing)", [e for e, _ in cap.ev], ok([e for e, _ in cap.ev] == [fp.DIT_DOWN, fp.DIT_UP])); sp.close()
+reports = []; mon = fp.DeviceMonitor(reports.append); mon.start_serial("loop://"); time.sleep(0.15)
+print("   the Monitor too:", mon.port.dtr, mon.port.rts, ok(mon.port.dtr is False and mon.port.rts is False), "| at rest it says:", reports[0][34:80])
+mon.port.rts = True; time.sleep(0.05); mon.port.rts = False; time.sleep(0.05); mon.port.dtr = True; time.sleep(0.05)
+print("   it records which lines closed, in order:", mon.lines_seen, "| changes counted:", mon.count, ok(mon.lines_seen == ["CTS", "DSR"] and mon.count == 3)); mon.stop()
+mon = fp.DeviceMonitor(lambda m: None); mon.start_serial("loop://", drive_dtr=True, drive_rts=True)
+print("   with both switched on the Monitor drives them:", mon.port.dtr, mon.port.rts, ok(mon.port.dtr and mon.port.rts)); mon.stop()
+
+print("--- 11. the Monitor can listen to every MIDI input at once, and records the notes in order")
+import rtmidi
+class FakeIn:
+    made = []
+    def __init__(self, *a, **k): FakeIn.made.append(self); self.cb = None; self.opened = None
+    def get_ports(self): return ["Midi Through:Midi Through Port-0 14:0", "Vail Adapter:Vail Adapter MIDI 1 24:0", "HaliKey:HaliKey MIDI 28:0"]
+    def open_port(self, i): self.opened = i
+    def set_callback(self, cb): self.cb = cb
+    def cancel_callback(self): self.cb = None
+    def close_port(self): self.opened = None
+class FakeOut2:
+    def get_ports(self): return ["Vail Adapter:Vail Adapter MIDI 1 24:0"]
+    def open_port(self, i): pass
+    def send_message(self, m): pass
+    def close_port(self): pass
+real_in, real_out = rtmidi.MidiIn, rtmidi.MidiOut; rtmidi.MidiIn, rtmidi.MidiOut = FakeIn, FakeOut2
+fp.MidiSupport.result = (True, "", [], [])
+reports = []; mon = fp.DeviceMonitor(reports.append); mon.start_midi(fp.ALL_MIDI)
+opened = [m for m in FakeIn.made if m.opened is not None]
+print("   every input was opened:", sorted(m.opened for m in opened), ok(sorted(m.opened for m in opened) == [0, 1, 2]))
+halikey = [m for m in opened if m.opened == 2][0]; vail = [m for m in opened if m.opened == 1][0]
+halikey.cb(([0x90, 7, 0], 0.0)); halikey.cb(([0x80, 7, 12], 0.01)); vail.cb(([0x90, 2, 0], 0.0)); halikey.cb(([0x90, 9, 4], 0.02))
+print("   each message says which port it came from:", [r[:62] for r in reports if r.startswith("MIDI in")][:2], ok(any("[HaliKey:HaliKey MIDI 28:0]" in r for r in reports) and any("[Vail Adapter:Vail Adapter MIDI 1 24:0]" in r for r in reports)))
+print("   the notes seen, in the order they first came on:", mon.notes_seen, "| messages:", mon.count, ok(mon.notes_seen == [7, 2, 9] and mon.count == 4))
+mon.stop(); print("   stopping closes them all:", ok(all(m.opened is None for m in FakeIn.made)))
+reports = []; FakeIn.made.clear(); mon = fp.DeviceMonitor(reports.append); mon.start_midi("HaliKey:HaliKey MIDI 28:0")
+print("   one chosen port opens only that one:", [m.opened for m in FakeIn.made if m.opened is not None], ok([m.opened for m in FakeIn.made if m.opened is not None] == [2])); mon.stop()
+rtmidi.MidiIn, rtmidi.MidiOut = real_in, real_out
+
+print("--- 12. a MIDI note that is not in the box is said so, not dropped in silence")
+said = []; k = type("K", (), {"log": said.append, "paddle": lambda self, *a, **kw: said.append("PADDLE")})(); m = fp.MidiPaddles(k, [20], [21])
+m.handle([0x90, 5, 0], 0.0); m.handle([0x80, 5, 20], 0.0)
+print("   a note of 5 when the box says 20 and 21:", [x[:90] for x in said], ok(len(said) == 1 and "note 5 is not one of the notes" in said[0] and "Use what was seen" in said[0]))
+m.handle([0x90, 20, 0], 0.0); print("   a note that is in the box still keys:", ok("PADDLE" in said))

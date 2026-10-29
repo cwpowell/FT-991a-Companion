@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.4.3
+
+Fixes from trying 1.4.2 under Linux with a HaliKey serial key, a HaliKey MIDI and a Vail adapter.
+
+- **Opening a serial port to read a key no longer drives DTR or RTS.** Pressing Monitor (or Arm) on a serial
+  device keyed the transmitter without anyone touching the key: opening a port raises DTR and RTS (Linux does it,
+  and pyserial then leaves them asserted for as long as the port is open), and on an interface whose DTR or RTS
+  reach the transmitter that keys it. Both are now set low before the port opens and stay low. **Drive DTR** and
+  **Drive RTS** switches (off by default) are there for an interface that needs them as power for its key inputs.
+  On Linux the first open of a port can still raise the lines for a moment before they are dropped, so keep the
+  transmitter safe (a dummy load) while you set a device up.
+- **The Monitor can listen to every MIDI input at once:** choose **(all MIDI inputs)** in the Port box. It labels
+  each message with the port it came from, so you can see which port a device is really on (a Vail adapter that
+  "shows no activity" may be talking on a port other than the one chosen). It also lists the MIDI output ports it
+  found, and says exactly which port it sent a Vail adapter's set-up to.
+- **Use what was seen:** the Monitor remembers the MIDI notes (or serial lines) in the order they first came on,
+  and this button sets dit to the first and dah to the second (a straight key takes only the first). A HaliKey MIDI
+  that "shows key up and key down events but gives no code" is almost certainly sending notes other than the ones in
+  the box.
+- **A note that is not in the box is now said so**, in the log, instead of being ignored in silence: "MIDI note 5 is
+  not one of the notes in the box (dit [20], dah [21]) ...".
+- **Arming logs what it is using** (device, port, dit and dah, speed, and for serial whether DTR and RTS are driven).
+- **A Monitor that hears nothing for 6 s says what to try** (MIDI mode, unplug and replug, (all MIDI inputs)).
+- **Test tone** sounds the sidetone for a moment, apart from the keying, and says why if it cannot (no sound library,
+  no output). A sidetone that fails to start is now shown in the window as well as the log.
+- The note at the bottom of the CW window described only cwdaemon; it now mentions keying-daemon.py. The window is
+  652 px tall, and fits a 768-pixel screen.
+
+## 1.4.2
+
+- **The panel no longer dies at start-up when python-rtmidi misbehaves.** On a Mac with Python 3.14, 1.4.1
+  crashed ("Abort trap: 6", `PyEval_RestoreThread ... the GIL is released`) before the window opened, inside
+  python-rtmidi's native code, which the panel asked for the MIDI ports while building the CW window. A
+  native crash cannot be caught by Python, so this could not be fixed by catching an error.
+  - Nothing native is called at start-up now. A saved MIDI device is remembered, but the library is not asked for
+    anything until you select a MIDI device, press **Refresh**, **Monitor** or **Arm**.
+  - **The library is first asked, in a separate process, for the MIDI ports** (the panel runs itself with a hidden
+    `--rtmidi-probe` option). Only if that works is python-rtmidi used inside the panel. If the probe crashes,
+    hangs, or cannot start, MIDI paddles are off and the window says why, and serial paddles, the test key and
+    the text carry on. The message depends on how it failed (not installed; crashed, with advice about Python
+    3.14 only on 3.14 or later; or the error the library reported, such as no MIDI system).
+  - Tested by simulating a library that aborts its process (exit code -6, as on the Mac), one that is missing,
+    and one that hangs, and by starting the real panel with a saved MIDI device and such a library.
+- **If you run from source on Python 3.14**, python-rtmidi may not work yet: use Python 3.12 or 3.13, or the
+  installer, which is built with Python 3.12.
+
 ## 1.4.1
 
 Fixes from the first tries on real devices (HaliKey serial, HaliKey MIDI, a Vail adapter, and the daemon on a

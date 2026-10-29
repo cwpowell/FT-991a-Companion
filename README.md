@@ -211,7 +211,22 @@ press Monitor again to stop, then tick **Arm**.
   **Vail adapter (paddles)**: the panel sends that, and the speed and pitch, when you arm (without it the adapter
   keys and sounds its own sidetone but sends the program nothing). Its notes are 1 and 2.
 - A **serial** key or paddles: a key is closed when its line differs from how it stood when you armed, so arm with
-  the key open.
+  the key open. The panel opens the port with **DTR and RTS off**, so opening it cannot key anything; tick
+  **Drive DTR** or **Drive RTS** only if your interface needs them for power. (Some interfaces have DTR or RTS wired
+  to the transmitter's key line: with those on, the transmitter would be keyed as soon as the port opened. Use a dummy
+  load while you set a device up.)
+- **Use what was seen:** press Monitor, press the dit paddle and then the dah paddle, and click **Use what was seen**
+  to set the notes or lines from what the device really sent. Choose **(all MIDI inputs)** in the Port box to see
+  which port a device is on. **Test tone** checks the sidetone apart from the keying.
+- **If a MIDI device shows events but nothing keys,** the notes in the box are not the ones it sends (the log says
+  "MIDI note N is not one of the notes in the box"). **If there is no tone,** use Test tone: it needs the
+  `sounddevice` package (and, on Linux, `libportaudio2`).
+
+**MIDI devices need python-rtmidi to work.** Running from source on a very new Python (3.14, for example) it may
+crash. The panel asks it for the MIDI ports in a separate process first, so it will not take the panel down: it
+turns MIDI off and says why. If that happens, use Python 3.12 or 3.13, or the installer (built with 3.12). For
+example: `python3.12 -m venv ~/ft991a-venv`, then `~/ft991a-venv/bin/pip install numpy sounddevice opuslib pyserial
+python-rtmidi`, then `~/ft991a-venv/bin/python ft991a-panel.py`.
 
 **If the radio sends a string of dits**, run the daemon with `--verbose`. If it prints `key DOWN` and `key up`
 again and again, the cause is on the panel's side: disarm, and use Monitor to check the device. If it prints
