@@ -65,9 +65,10 @@ The screenshots were taken against the simulated radio in this repository.
   tells you when a message has finished, **Abort** stops it at once, and **Zero in** starts the radio's CW
   auto zero-in. It refuses unless the radio is in a CW mode and not transmitting. A **Key** row (**Arm**, and a
   **Test key** that you hold like a straight key) sends key-down and key-up to `keying-daemon.py` on the
-  radio's computer, which keeps their timing exactly. A **Paddle or key** box adds a keyer: a MIDI or serial
-  straight key or paddles, or a Vail adapter, with iambic A or B, a dit memory and a sidetone. Its iambic
-  logic and its MIDI and serial input handling come from W7DA's K4-Companion (see `NOTICE.md`).
+  radio's computer, which keeps their timing exactly. A **HaliKey MIDI key or paddles** box adds a keyer:
+  a HaliKey MIDI straight key or paddles, with iambic A or B, a dit memory, a sidetone with a volume of its own, and
+  a **SPOT** button that holds the tone so that you can tune a signal to its pitch. Its iambic logic and its MIDI
+  input handling come from W7DA's K4-Companion (see `NOTICE.md`).
 
 **Menu tab**
 
@@ -204,47 +205,40 @@ window's text box works unchanged, and it also takes timestamped key events on p
 5. **In the CW window:** type the radio's computer in the address box (the text port stays 6789 and the
    daemon port 6790), tick **Arm**, and try the **Test key** on a dummy load.
 
-**Paddles and keys.** Choose a device in the **Paddle or key** box, pick its port, and press **Monitor**: it shows
-which note or serial line moves when you press the key, and keys nothing. Set the notes or lines to what it shows,
-press Monitor again to stop, then tick **Arm**.
-- A **Vail adapter**, and probably a **HaliKey MIDI** (it is Vail-compatible), must be told to use MIDI mode. Choose
-  **Vail adapter (paddles)**: the panel sends that, and the speed and pitch, when you arm (without it the adapter
-  keys and sounds its own sidetone but sends the program nothing). Its notes are 1 and 2.
-- A **serial** key or paddles: a key is closed when its line differs from how it stood when you armed, so arm with
-  the key open. The panel opens the port with **DTR and RTS off**, so opening it cannot key anything; tick
-  **Drive DTR** or **Drive RTS** only if your interface needs them for power. (Some interfaces have DTR or RTS wired
-  to the transmitter's key line: with those on, the transmitter would be keyed as soon as the port opened. Use a dummy
-  load while you set a device up.)
-- **Use what was seen:** press Monitor, press the dit paddle and then the dah paddle, and click **Use what was seen**
-  to set the notes or lines from what the device really sent. Choose **(all MIDI inputs)** in the Port box to see
-  which port a device is on. **Test tone** checks the sidetone apart from the keying.
-- **If a MIDI device shows events but nothing keys,** the notes in the box are not the ones it sends (the log says
-  "MIDI note N is not one of the notes in the box"). **If there is no tone,** use Test tone: it needs the
-  `sounddevice` package (and, on Linux, `libportaudio2`).
+**The HaliKey MIDI.** In the **HaliKey MIDI key or paddles** box choose **HaliKey paddles** (iambic A or B) or
+**HaliKey straight key**, pick its port (**Refresh** looks again, and the HaliKey is chosen for you when it is
+there), then tick **Arm**. A HaliKey sends notes 20 (dit) and 21 (dah) and puts its own timing in the messages,
+which the panel uses. This is the only keying device the panel supports: serial keys and the Vail adapter were
+tried and removed in 1.6.0.
+- **Changing anything while armed** (the device, the port, the mode, the dit memory) re-opens the device at once;
+  the status line names what is armed, for example `HaliKey paddles on HaliKey MIDI: Iambic B`.
+- **Volume** is the sidetone's own volume (0 silences it), and **Pitch Hz** its pitch. **SPOT** holds the tone on,
+  so that you can tune the radio until the signal you hear matches it; it also asks the radio for its CW pitch and
+  uses that, so that matching the tone matches the radio's filter. Press SPOT again to stop it.
+- **What you type and the macros are heard at the panel** as a sidetone, with the keying's timing, and Abort stops it.
+- **More** shows or hides what is below it: the **Monitor** button (it shows the notes the HaliKey sends when you
+  press it, and keys nothing) and the notes at the bottom. It is remembered, and starts hidden.
+- **The radio's own sidetone** sounds at the radio. The radio's **MONI** setting controls it there. The Function
+  tab has a **Monitor level (MONI)** slider on its CW page (and on the Transmit page), which sends the CAT command
+  `ML`. Whether that silences the sidetone at the radio's speaker is not confirmed: in one test it silenced the
+  audio sent to the computer instead, so the radio's front-panel MONI may be a different setting.
+- **If a HaliKey shows events in the Monitor but nothing keys,** the radio must be in a CW mode, and the status
+  line says "Not keyed: ..." and why. **If there is no tone,** it needs the `sounddevice` package (and, on Linux,
+  `libportaudio2`).
 
-**MIDI devices need python-rtmidi, which runs in a separate helper process.** python-rtmidi is a native library
+**The HaliKey needs python-rtmidi, which runs in a separate helper process.** python-rtmidi is a native library
 that can crash the program it runs in (it did, on a Mac with Python 3.14), so the panel never loads it: it starts
 itself as a helper to do all the MIDI work and talks to it over a socket on the same computer. If the helper dies,
-the keys are let go, the window says why, and the panel carries on; disarm and arm again to start a new one. If
+the key is let go, the window says why, and the panel carries on; disarm and arm again to start a new one. If
 MIDI will not work on your Python, use Python 3.12 or 3.13, or the installer (built with 3.12): for example
-`python3.12 -m venv ~/ft991a-venv`, then `~/ft991a-venv/bin/pip install numpy sounddevice opuslib pyserial
-python-rtmidi`, then `~/ft991a-venv/bin/python ft991a-panel.py`.
+`python3.12 -m venv ~/ft991a-venv`, then `~/ft991a-venv/bin/pip install numpy sounddevice opuslib python-rtmidi`,
+then `~/ft991a-venv/bin/python ft991a-panel.py`. While you key, the meters are polled faster and hold their
+peaks for a moment.
 
-A **HaliKey MIDI** sends notes 20 and 21 (dit and dah), the defaults for MIDI paddles. A **Vail adapter** always
-starts in keyboard mode and needs the MIDI-mode message that the panel sends when you arm; its MIDI port must show in
-the Monitor's list of MIDI input ports, or there is nothing to send to.
-
-**Your serial key's lines.** Run Monitor, press the dot paddle and then the dash paddle, and press Stop monitor: the boxes are
-set from what you pressed (if they still held the defaults); **Use what was seen** does the same at any time. Lines that move together
-are one paddle (a HaliKey serial moves DSR and DCD together for one paddle and CTS alone for the other, so dit = CTS and
-dah = DSR, or the other way round).
-
-**Changing a setting while armed** (the device, port, notes, mode and the rest) re-opens the device at once; the status
-line names what is armed. **What you type and the macros are heard at the panel as a sidetone** with the keying's
-timing. **Mute radio speaker** (experimental) silences the radio's own sidetone at the radio by setting its AF gain to 0 while armed,
-and puts it back when you disarm or close the panel. It is not known that the FT-991A's USB audio is independent of AF
-gain: if the audio you hear at the panel goes quiet when you arm, untick the box. (The radio's monitor level was tried
-first and silenced the audio sent to your computer instead, not the speaker.) While you key, the meters are polled faster and hold their peaks for a moment.
+**Starting up.** When the program opens it connects to the radio at the last server you used, and then starts the
+audio there too, if you have set the audio up before. Neither shows a dialog if it cannot: the log says why, and the
+Connect and Start audio buttons work as always. If the radio is off, the connection still comes up, and the **Power
+on** button can start it. To turn this off, set `"auto_connect": false` in `~/.ft991a-panel.json`.
 
 **If the radio sends a string of dits**, run the daemon with `--verbose`. If it prints `key DOWN` and `key up`
 again and again, the cause is on the panel's side: disarm, and use Monitor to check the device. If it prints
@@ -266,8 +260,8 @@ Developed against the simulators in this repository. The maintainer has run it a
 FT-991A over ser2net from macOS: the control panel, remote power on and off, push-to-talk, and
 audio in both directions with PCM and Opus,  and the local-radio audio mode. The Function tab, the 
 Band pull-down and the noise reduction have also been tested and seem to function within normal 
-operating parameters. The CW window, its keyer, and the MIDI and serial inputs have so far been tested
-only against simulated devices, the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
+operating parameters. The CW window and its keyer have been tried on a real radio with a HaliKey MIDI
+(iambic and straight key) and otherwise tested only against simulated devices, the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
 an issue with the log and the status text from the Audio tab.
 
 ## Documentation

@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.6.0
+
+A simplification after testing: the HaliKey MIDI works well, and everything else for the paddles was removed.
+
+- **Serial keying and the Vail adapter are gone.** Their code, the DTR and RTS boxes, the note and line boxes and
+  "Use what was seen" are removed, and the panel is about 280 lines shorter. A device saved as `MIDI paddles` or
+  `MIDI straight key` comes back as **HaliKey paddles** or **HaliKey straight key**; a serial or Vail device
+  becomes None. The notes are fixed at the HaliKey's own 20 and 21. pyserial is no longer in the installers, the
+  self-test or the third-party notices (the keying daemon on the radio's computer still uses it).
+- **The device box reads HaliKey paddles, HaliKey straight key or None.** Refresh looks at the MIDI ports again, and the
+  HaliKey is chosen for you if it is there (not "Midi Through", which sorts first).
+- **The Sidetone check box and Mute radio speaker are gone.** Mute radio speaker set the radio's AF gain and did not
+  silence its sidetone. The Volume slider (below) silences the local tone.
+- **The local sidetone has a Volume slider of its own** (0 to 100, saved).
+- **SPOT replaces Test tone.** It is a toggle that holds the tone on, so that a signal can be tuned to its pitch. When
+  it comes on the panel asks the radio for its CW pitch (`KP`) and uses it; typing a pitch changes the held tone at once.
+- **A More button above the Monitor hides everything below it** (the Monitor and the notes at the bottom). It is
+  remembered and starts hidden, which makes the CW window about 115 px shorter.
+- **A Monitor level (MONI) slider on the Function tab's CW page**, as well as on the Transmit page (the CAT command
+  is `ML`). It is not confirmed that it silences the radio's own sidetone.
+- **The radio and the audio connect by themselves at the last known server when the program opens.** The audio
+  starts only if it was set up before. Neither shows a dialog when it cannot: the log says why. `"auto_connect":
+  false` in `~/.ft991a-panel.json` turns it off.
+- The keyer-to-daemon timing test retries a measurement that misses by a few milliseconds on a busy machine, and says so.
+
 ## 1.5.1
 
 - **Mute radio tone is gone; Mute radio speaker replaces it.** Setting the radio's monitor level (`ML1`) to 0
