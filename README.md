@@ -218,10 +218,9 @@ tried and removed in 1.6.0.
 - **What you type and the macros are heard at the panel** as a sidetone, with the keying's timing, and Abort stops it.
 - **More** shows or hides what is below it: the **Monitor** button (it shows the notes the HaliKey sends when you
   press it, and keys nothing) and the notes at the bottom. It is remembered, and starts hidden.
-- **The radio's own sidetone** sounds at the radio. The radio's **MONI** setting controls it there. The Function
-  tab has a **Monitor level (MONI)** slider on its CW page (and on the Transmit page), which sends the CAT command
-  `ML`. Whether that silences the sidetone at the radio's speaker is not confirmed: in one test it silenced the
-  audio sent to the computer instead, so the radio's front-panel MONI may be a different setting.
+- **The radio's own sidetone** sounds at the radio, and the radio's **MONI** setting controls it there. The Function
+  tab has a **Monitor level (MONI)** slider on its CW page (and on the Transmit page): set it to 0 to silence the
+  radio's sidetone, and raise it again for SSB. (Tested on a real FT-991A.)
 - **If a HaliKey shows events in the Monitor but nothing keys,** the radio must be in a CW mode, and the status
   line says "Not keyed: ..." and why. **If there is no tone,** it needs the `sounddevice` package (and, on Linux,
   `libportaudio2`).

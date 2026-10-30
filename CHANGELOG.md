@@ -19,7 +19,7 @@ A simplification after testing: the HaliKey MIDI works well, and everything else
 - **A More button above the Monitor hides everything below it** (the Monitor and the notes at the bottom). It is
   remembered and starts hidden, which makes the CW window about 115 px shorter.
 - **A Monitor level (MONI) slider on the Function tab's CW page**, as well as on the Transmit page (the CAT command
-  is `ML`). It is not confirmed that it silences the radio's own sidetone.
+  is `ML`). Confirmed on a real FT-991A: it silences the radio's own sidetone.
 - **The radio and the audio connect by themselves at the last known server when the program opens.** The audio
   starts only if it was set up before. Neither shows a dialog when it cannot: the log says why. `"auto_connect":
   false` in `~/.ft991a-panel.json` turns it off.
