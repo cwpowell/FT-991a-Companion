@@ -50,7 +50,7 @@ The screenshots were taken against the simulated radio in this repository.
 - The radio's front-panel functions in five small pages: **Receive** (preamp, attenuator, RF gain,
   squelch, contour, audio peak filter), **Noise** (noise blanker, the radio's own DNR noise
   reduction, auto and manual notch), **Transmit** (speech processor, mic equalizer, mic gain,
-  monitor, VOX), **CW** (keyer, break-in, speed, pitch, delay, CW spot) and **FM etc** (repeater
+  monitor, VOX), **CW** (keyer, break-in, speed, pitch, delay, CW spot, and the monitor level, MONI, which sets the radio's own sidetone) and **FM etc** (repeater
   shift, CTCSS tone, dial lock, fast step).
 - It reads the page that is showing, so a change made on the radio appears here. Every change is
   read back, a function the radio does not answer in its present mode is greyed out, VOX asks
@@ -66,7 +66,7 @@ The screenshots were taken against the simulated radio in this repository.
   auto zero-in. It refuses unless the radio is in a CW mode and not transmitting. A **Key** row (**Arm**, and a
   **Test key** that you hold like a straight key) sends key-down and key-up to `keying-daemon.py` on the
   radio's computer, which keeps their timing exactly. A **HaliKey MIDI key or paddles** box adds a keyer:
-  a HaliKey MIDI straight key or paddles, with iambic A or B, a dit memory, a sidetone with a volume of its own, and
+  a HaliKey MIDI straight key or paddles, with iambic A or B, a dit memory, a sidetone with a volume of its own (played on the computer's default sound output), and
   a **SPOT** button that holds the tone so that you can tune a signal to its pitch. Its iambic logic and its MIDI
   input handling come from W7DA's K4-Companion (see `NOTICE.md`).
 
@@ -253,15 +253,21 @@ nothing while the radio sends dits, the radio's own keyer is answering the line:
 
 ## Status
 
-Version 1.1.0 (see `CHANGELOG.md`).
+Version 1.6.0 (see `CHANGELOG.md`).
 
-Developed against the simulators in this repository. The maintainer has run it against a real
-FT-991A over ser2net from macOS: the control panel, remote power on and off, push-to-talk, and
-audio in both directions with PCM and Opus,  and the local-radio audio mode. The Function tab, the 
-Band pull-down and the noise reduction have also been tested and seem to function within normal 
-operating parameters. The CW window and its keyer have been tried on a real radio with a HaliKey MIDI
-(iambic and straight key) and otherwise tested only against simulated devices, the simulators and the real `cwdaemon`. Not yet tested under Windows. Expect rough edges there, and please open 
-an issue with the log and the status text from the Audio tab.
+Developed against the simulators in this repository, and used by the maintainer with a real FT-991A over
+ser2net from macOS and Linux: the control panel, remote power on and off, push-to-talk, audio in both
+directions with PCM and Opus, and the local-radio audio mode. The Function tab, the Band pull-down and
+the noise reduction have also been tested and seem to function within normal operating parameters. The
+CW window has been used on a real radio with a HaliKey MIDI (iambic and straight key); the text path was
+also tried against the real `cwdaemon`, and the rest against simulated devices.
+
+**Windows** has been tested for basic operation: the network audio needs no extra software (choose
+"(direct)" for the radio ends), and the radio and the audio reconnect by themselves when the program
+starts. The CW sidetone has noticeably more delay there than on a Mac. It plays through Windows' older
+MME audio interface, which adds delay, and it affects only the tone you hear while keying (the keying is
+timed by the daemon on the radio's computer). Opus on Windows has not been tested. Please open an issue
+with the log and the status text from the Audio tab if something misbehaves.
 
 ## Documentation
 
