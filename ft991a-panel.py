@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.6.0"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.7.0"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -197,7 +197,23 @@ OPUS_BW = {"nb": "NARROWBAND", "wb": "WIDEBAND", "swb": "SUPERWIDEBAND",
            "fb": "FULLBAND"}
 OPUS_SIGNALS = ("music", "voice", "auto")
 
-DEFAULTS = dict(port=5800, bind="0.0.0.0", rate=48000, frame_ms=10, jitter_ms=80,
+LATENCY_CHOICES = ("Low", "Medium", "High")      # the sound device's own buffer: High is what PortAudio does by default
+
+
+def pick_latency(choice, dev, kind):
+    """The latency to ask PortAudio for, or None to leave its default (High). kind is "input" or "output".
+    Medium is half way between the device's low and high values."""
+    if choice not in ("Low", "Medium"):
+        return None
+    try:
+        info = sd.query_devices(dev, kind) if dev is not None else sd.query_devices(kind=kind)
+        low, high = float(info[f"default_low_{kind}_latency"]), float(info[f"default_high_{kind}_latency"])
+    except Exception:
+        return "low" if choice == "Low" else None
+    return "low" if choice == "Low" else (low + high) / 2
+
+
+DEFAULTS = dict(port=5800, bind="0.0.0.0", rate=48000, frame_ms=10, jitter_ms=80, latency="High",
                 codec="pcm", bitrate=64000, opus_bw="nb", opus_signal="music", complexity=5, cbr=False, fec=False,
                 loss=5, dump_play=None, dump_capture=None, out_channels=2,
                 in_gain_db=0.0, out_gain_db=0.0, pace=True, rx_only=False)
@@ -399,6 +415,24 @@ class JitterBuffer:
     def level(self):
         with self.lock:
             return len(self.q)
+
+    def resize(self, prefill, maxframes):
+        """Change the depth while audio plays, and make it count at once. A queue that stands at the old depth
+        would otherwise keep it until the next dropout. Deeper: pause until it has refilled to the new depth (one
+        short gap, then the new margin is real). Shallower: shed the extra frames now (one small glitch)."""
+        with self.lock:
+            old = self.prefill
+            self.prefill = max(1, prefill)
+            self.maxframes = max(maxframes, self.prefill + 1)
+            if self.prefill > old:
+                self.primed = False
+            elif self.prefill < old:                     # (the same depth changes nothing)
+                while len(self.q) > self.prefill:
+                    self.q.popleft()
+                    self.overflows += 1
+            while len(self.q) > self.maxframes:
+                self.q.popleft()
+                self.overflows += 1
 
 
 class Node:
@@ -801,13 +835,21 @@ class Node:
 
             kw = dict(samplerate=self.rate, channels=1, dtype="int16",
                       blocksize=self.bs)
+            choice = getattr(a, "latency", "High")
             if getattr(a, "rx_only", False):          # listen only: no microphone is opened and
                 self.log("Listen-only: not opening an input device, sending no audio")
             else:                                    # nothing but keepalives goes to the other end
+                ikw = dict(kw)
+                lat = pick_latency(choice, self.in_dev, "input")
+                if lat is not None:
+                    ikw["latency"] = lat
                 self.in_stream = _logged_open(
                     self.log, "opening the capture stream", self.in_dev, sd.RawInputStream,
-                    device=self.in_dev, callback=self.in_cb, **kw)
+                    device=self.in_dev, callback=self.in_cb, **ikw)
             okw = dict(kw)
+            lat = pick_latency(choice, self.out_dev, "output")
+            if lat is not None:
+                okw["latency"] = lat
             while True:
                 okw["channels"] = self.out_ch
                 try:
@@ -870,6 +912,20 @@ class Node:
             if d is not None:
                 d.close()
 
+    def set_jitter_ms(self, ms):
+        """Change the receive buffer while running (the other direction's buffer is the other end's)."""
+        ms = max(self.args.frame_ms, int(ms))
+        prefill = max(1, ms // self.args.frame_ms)
+        self.args.jitter_ms = ms
+        self.jb.resize(prefill, prefill * 3 + 5)
+
+    def device_latency_ms(self):
+        """What PortAudio reports for the playback device's own buffer, in ms, or None."""
+        try:
+            return round(float(self.out_stream.latency) * 1000)
+        except Exception:
+            return None
+
     def stats(self):
         """Snapshot of link statistics. tx_kbps is averaged since the last call."""
         now = time.time()
@@ -884,7 +940,7 @@ class Node:
                     late=self.late, tx_err=self.tx_err, tx_pkts=self.tx_pkts,
                     loss_events=self.loss_events, max_gap=self.max_gap,
                     underruns=self.jb.underruns, dropped=self.jb.overflows,
-                    buf=self.jb.level())
+                    buf=self.jb.level(), device_ms=self.device_latency_ms())
 
     # ---- command-line runner ---------------------------------------------
     def run(self):
@@ -4908,9 +4964,10 @@ class AudioPath:
     with different block sizes. Device warnings and errors are logged, never swallowed."""
     PRIME, MAXQ = 3, 12                 # frames: start playing after 3 are queued, drop beyond 12
 
-    def __init__(self, name, in_dev, out_dev, rate, frame_ms, stereo, log):
+    def __init__(self, name, in_dev, out_dev, rate, frame_ms, stereo, log, latency="High"):
         # in_dev None: nothing is captured; audio is handed over with feed() instead
         self.name, self.in_dev, self.out_dev, self.log = name, in_dev, out_dev, log
+        self.latency = latency
         self.rate, self.bs = rate, rate * frame_ms // 1000
         self.out_ch = 2 if stereo else 1
         self.sink = None                # a function that takes each captured frame (no output device)
@@ -4933,10 +4990,17 @@ class AudioPath:
         kw = dict(samplerate=self.rate, channels=1, dtype="int16", blocksize=self.bs)
         try:
             if self.in_dev is not None:
+                ikw = dict(kw)
+                lat = pick_latency(self.latency, self.in_dev, "input")
+                if lat is not None:
+                    ikw["latency"] = lat
                 self.in_stream = _logged_open(
                     self.log, f"opening the {self.name} path input", self.in_dev,
-                    sd.RawInputStream, device=self.in_dev, callback=self._in_cb, **kw)
+                    sd.RawInputStream, device=self.in_dev, callback=self._in_cb, **ikw)
             okw = dict(kw)
+            lat = pick_latency(self.latency, self.out_dev, "output")
+            if lat is not None:
+                okw["latency"] = lat
             while self.out_dev is not None:
                 okw["channels"] = self.out_ch
                 try:
@@ -5151,6 +5215,18 @@ class Panel:
         self.s9_calibrated = isinstance(self.cfg.get("s9_raw"), int)
         self.s9_raw = self.cfg["s9_raw"] if self.s9_calibrated else S9_DEFAULT_RAW
         self.show_cal = bool(self.cfg.get("show_cal", False))
+        self.show_delay = bool(self.cfg.get("show_delay", False))
+        try:
+            jit = max(20, min(1000, int(self.cfg.get("audio_jitter", 110))))
+        except (TypeError, ValueError):
+            jit = 110
+        self.audio_jitter = tk.StringVar(value=str(jit))          # the receive buffer, in ms: changed live from the Radio tab
+        self.jit_val = tk.IntVar(value=min(800, jit))
+        lat = self.cfg.get("audio_latency", "High")
+        self.audio_latency = tk.StringVar(value=lat if lat in LATENCY_CHOICES else "High")     # the sound device's own buffer
+        self.delay_txt = tk.StringVar(value="Audio is not running.")
+        self.latency_pending = False                              # the buffer was changed while audio runs: waits for a restart
+        self.drop_hist = collections.deque()                      # (time, underruns), to say how many dropouts in the last minute
         self.log_hidden = bool(self.cfg.get("log_hidden", False))
         self._tick_errors = set()                # errors in the periodic update already reported
         self.band_var = tk.StringVar(value="Band")
@@ -5393,6 +5469,38 @@ class Panel:
         ttk.Label(b, textvariable=self.cal_txt).grid(row=1, column=0, columnspan=4,
                                                       sticky="w", pady=(2, 0))
         self.apply_cal_visibility()
+        # audio delay: choppy or dropping out? Raise the jitter. Too much delay? Lower it. Hidden until wanted.
+        if AUDIO_OK:
+            self.delay_toggle = ttk.Button(m, text="Audio delay", width=14, command=self.toggle_delay)
+            self.delay_toggle.grid(row=6, column=2, sticky="e", pady=(3, 0))
+            d = ttk.Frame(m)
+            self.delay_frame = d
+            d.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(3, 0))
+            ttk.Label(d, text="Jitter:").grid(row=0, column=0, sticky="e")
+            self.jit_scale = ttk.Scale(d, from_=20, to=800, variable=self.jit_val, length=190,
+                                       command=self.on_jitter_slide)
+            self.jit_scale.grid(row=0, column=1, padx=6)
+            self.jit_scale.bind("<ButtonRelease-1>", self.apply_jitter)
+            self.jit_scale.bind("<KeyRelease>", self.apply_jitter)
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self.jit_scale.bind(seq, lambda e: "break")           # the wheel must never change a setting
+            self.jit_lbl = ttk.Label(d, text="", width=8)
+            self.jit_lbl.grid(row=0, column=2, sticky="w")
+            ttk.Label(d, text="Buffer:").grid(row=1, column=0, sticky="e", pady=(2, 0))
+            self.r_lat_cb = ttk.Combobox(d, textvariable=self.audio_latency, values=LATENCY_CHOICES, width=8,
+                                         state="readonly")
+            self.r_lat_cb.grid(row=1, column=1, sticky="w", padx=6, pady=(2, 0))
+            self.r_lat_cb.bind("<<ComboboxSelected>>", self.on_latency_changed)
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self.r_lat_cb.bind(seq, lambda e: "break")
+            self.restart_btn = ttk.Button(d, text="Restart audio", width=14, command=self.restart_audio)
+            self.restart_btn.grid(row=1, column=2, sticky="w", pady=(2, 0))
+            ttk.Label(d, textvariable=self.delay_txt, foreground="#555555", wraplength=420,
+                      justify="left").grid(row=2, column=0, columnspan=3, sticky="w", pady=(3, 0))
+            ttk.Label(d, foreground="#777777", text="Choppy? Raise the jitter. Too much delay? Lower it.").grid(
+                row=3, column=0, columnspan=3, sticky="w", pady=(1, 0))
+            self.jit_lbl.configure(text=f"{self.audio_jitter.get()} ms")     # (only the label: the saved value stays as it is)
+            self.apply_delay_visibility()
 
         # ---- log, with a button to hide it
         lh = ttk.Frame(outer)
@@ -5547,7 +5655,6 @@ class Panel:
         self.audio_host = tk.StringVar(value=c.get("audio_host", ""))
         self.audio_port = tk.StringVar(value=str(c.get("audio_port", 5800)))
         self.audio_codec = tk.StringVar(value=c.get("audio_codec", "pcm"))
-        self.audio_jitter = tk.StringVar(value=str(c.get("audio_jitter", 110)))
         self.audio_rate = tk.StringVar(value=str(adv.get("rate", 48000)))
         self.audio_frame = tk.StringVar(value=str(adv.get("frame", 10)))
         self.audio_pace = tk.BooleanVar(value=adv.get("pace", True))
@@ -5657,6 +5764,8 @@ class Panel:
         ttk.Label(g, text="Jitter:").grid(row=0, column=2, padx=(8, 0))
         self.a_jit_e = ttk.Entry(g, textvariable=self.audio_jitter, width=4)
         self.a_jit_e.grid(row=0, column=3, padx=3)
+        for seq in ("<Return>", "<FocusOut>"):
+            self.a_jit_e.bind(seq, self.apply_jitter)
         ttk.Label(g, text="ms").grid(row=0, column=4)
         self.a_adv_btn = ttk.Button(g, text="Advanced", width=11, command=self.toggle_adv)
         self.a_adv_btn.grid(row=0, column=5, padx=(14, 0))
@@ -5674,6 +5783,11 @@ class Panel:
                                        values=[str(m) for m in OPUS_FRAME_MS])
         self.a_frame_cb.grid(row=0, column=3, padx=3)
         ttk.Label(h, text="ms").grid(row=0, column=4, sticky="w")
+        ttk.Label(h, text="  Buffer:").grid(row=0, column=5, sticky="e")
+        self.a_lat_cb = ttk.Combobox(h, textvariable=self.audio_latency, width=7, state="readonly",
+                                     values=LATENCY_CHOICES)
+        self.a_lat_cb.grid(row=0, column=6, padx=3)
+        self.a_lat_cb.bind("<<ComboboxSelected>>", self.on_latency_changed)
         self.a_pace_ck = ttk.Checkbutton(h, text="Smooth packet timing", variable=self.audio_pace)
         self.a_pace_ck.grid(row=1, column=0, columnspan=3, sticky="w")
         self.a_stereo_ck = ttk.Checkbutton(h, text="Stereo playback", variable=self.audio_stereo)
@@ -5747,8 +5861,16 @@ class Panel:
         running = self.audio_running()
         remote = self.audio_mode.get() == "remote"
         net = "disabled" if (running or not remote) else "normal"
-        for w in (self.a_host_e, self.a_port_e, self.a_jit_e, self.a_pace_ck):
+        for w in (self.a_host_e, self.a_port_e, self.a_pace_ck):
             w.configure(state=net)
+        self.a_jit_e.configure(state="normal" if remote else "disabled")      # the jitter can change while audio runs
+        if hasattr(self, "jit_scale"):
+            self.jit_scale.state(["!disabled"] if remote else ["disabled"])
+            self.restart_btn.configure(state="normal" if running else "disabled")
+        if not running:
+            self.latency_pending = False
+            self.drop_hist.clear()
+            self.delay_txt.set("Audio is not running.")
         self.a_codec_cb.configure(state="disabled" if (running or not remote) else "readonly")
         for w in (self.a_radio_in_cb, self.a_spk_cb, self.a_mic_cb, self.a_radio_out_cb,
                   self.a_rate_cb, self.a_frame_cb):
@@ -6003,13 +6125,14 @@ class Panel:
                 # remote: the engine hands its received audio over in memory (it also plays it into
                 # the cable for FreeDV), so the cable is never opened a second time to be read back
                 rx_router = AudioPath("receive", None if remote else idx_rin,
-                                      self.a_out_map[spk], rate, frame, stereo, log)
+                                      self.a_out_map[spk], rate, frame, stereo, log,
+                                      latency=self.audio_latency.get())
                 rx_router.set_gain_db(pct_to_db(self.a_rx_pct))
             if mic_idx is not None and tx_cable:
                 # remote: the microphone goes straight to the bridge in memory (nothing is written
                 # into the cable, so the cable is opened once, only to be read for FreeDV's audio)
                 tx_router = AudioPath("transmit", mic_idx, None if remote else idx_rout,
-                                      rate, frame, stereo, log)
+                                      rate, frame, stereo, log, latency=self.audio_latency.get())
                 tx_router.set_gain_db(-120.0)       # the microphone starts muted
             if remote:
                 node_in = idx_rout if tx_cable else mic_idx
@@ -6021,6 +6144,7 @@ class Panel:
                     loss=max(0, min(100, loss)), in_dev=node_in,
                     out_dev=idx_rin if rx_cable else self.a_out_map[spk],
                     out_channels=2 if stereo else 1, pace=self.audio_pace.get(),
+                    latency=self.audio_latency.get(),
                     in_gain_db=0.0 if tx_cable else -120.0,
                     out_gain_db=0.0 if rx_cable else pct_to_db(self.a_rx_pct),
                     rx_only=node_in is None)
@@ -6267,6 +6391,7 @@ class Panel:
         head, detail = [], []
         if node is not None:
             st = node.stats()
+            self.delay_readout(st, now)
             if st["linked"] != self.a_was_linked:
                 self.a_was_linked = st["linked"]
                 self.append_log("Audio link up" if st["linked"] else "Audio link lost")
@@ -6421,6 +6546,75 @@ class Panel:
         self.port.set(self.ports[new])
         self.update_cal_text()
         self.append_log("Connection type: " + self.backend_var.get())
+
+    def toggle_delay(self):
+        self.show_delay = not self.show_delay
+        self.apply_delay_visibility()
+        self.fit_window(shrink=True)
+        self.save_cfg()
+
+    def apply_delay_visibility(self):
+        if self.show_delay:
+            self.delay_frame.grid()
+            self.delay_toggle.configure(text="Audio delay \u25be")
+        else:
+            self.delay_frame.grid_remove()
+            self.delay_toggle.configure(text="Audio delay \u25b8")
+
+    def on_jitter_slide(self, value):
+        """While the slider moves: show the number only. The change is made when it is let go."""
+        ms = int(round(float(value) / 10.0) * 10)
+        self.audio_jitter.set(str(ms))
+        self.jit_lbl.configure(text=f"{ms} ms")
+
+    def apply_jitter(self, event=None):
+        """Make the jitter in the box or on the slider the running one: it applies to what you hear, at once."""
+        try:
+            ms = int(self.audio_jitter.get())
+        except ValueError:
+            ms = None
+        if ms is None:
+            ms = int(round(self.jit_val.get()))
+            self.audio_jitter.set(str(ms))
+            return
+        ms = max(20, min(1000, ms))
+        self.audio_jitter.set(str(ms))
+        self.jit_val.set(min(800, ms))
+        if hasattr(self, "jit_lbl"):
+            self.jit_lbl.configure(text=f"{ms} ms")
+        node = self.audio_node
+        if node is not None and getattr(node.args, "jitter_ms", None) != ms:
+            node.set_jitter_ms(ms)
+            self.append_log(f"Audio: jitter buffer {ms} ms")
+        self.save_cfg()
+
+    def on_latency_changed(self, event=None):
+        """The device buffer is chosen when the streams are opened, so a change waits for a restart."""
+        self.save_cfg()
+        if self.audio_running():
+            self.latency_pending = True
+            self.append_log(f"Audio: the {self.audio_latency.get()} buffer applies when the audio restarts")
+
+    def restart_audio(self):
+        if not self.audio_running():
+            return
+        self.audio_stop()
+        self.root.after(600, self.audio_start)               # let the sound devices close before they are opened again
+
+    def delay_readout(self, st, now):
+        """The line under the delay controls, once a second: where the buffer stands, and how often it has run dry."""
+        self.drop_hist.append((now, st["underruns"]))
+        while self.drop_hist and now - self.drop_hist[0][0] > 60:
+            self.drop_hist.popleft()
+        drops = st["underruns"] - self.drop_hist[0][1]
+        frame = getattr(self.audio_node.args, "frame_ms", 10) if self.audio_node is not None else 10
+        text = (f"Queue {st['buf'] * frame} ms of {self.audio_node.args.jitter_ms} ms. Dropouts in the last minute: "
+                f"{drops}. Dropped to catch up: {st['dropped']}.")
+        if st.get("device_ms") is not None:
+            text += f" Sound device buffer: {st['device_ms']} ms."
+        if self.latency_pending:
+            text += " Restart audio to use the new buffer."
+        self.delay_txt.set(text)
 
     def toggle_cal(self):
         self.show_cal = not self.show_cal
@@ -6795,6 +6989,7 @@ class Panel:
                         audio_all_devices=self.audio_all_devices.get(),
                         audio_host=self.audio_host.get().strip(), audio_codec=self.audio_codec.get(),
                         audio_port=self.audio_port.get(), audio_jitter=self.audio_jitter.get(),
+                        audio_latency=self.audio_latency.get(), show_delay=self.show_delay,
                         audio_rx_pct=self.a_rx_pct, audio_tx_pct=self.a_tx_pct,
                         audio_devices=self.a_want,
                         audio_adv=dict(rate=self.audio_rate.get(), frame=self.audio_frame.get(),

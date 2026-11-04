@@ -131,7 +131,7 @@ print("--- 7. python-rtmidi is a native library that can kill the whole program:
 ABORT = [sys.executable, "-c", "import os; os.abort()"]
 def fresh(command=None, timeout=20): fp.MidiSupport.result = None; fp.MidiSupport.command = command; fp.MidiSupport.timeout = timeout
 fresh(); ok_, msg, pin, pout = fp.MidiSupport.check()
-print("   the real probe (this program run with --rtmidi-probe):", "worked, input ports" if ok_ else "reported", pin if ok_ else msg[:110], ok(ok_ or ("could not start" in msg and "crashed" not in msg)))
+print("   the real probe (this program run with --rtmidi-probe):", "worked, input ports" if ok_ else "reported", pin if ok_ else msg[:110], ok(ok_ or (("could not start" in msg or "is not installed" in msg) and "crashed" not in msg)))      # installed and working, installed but unable to start (no MIDI system), or not installed: all harmless reports
 print("   (where the library cannot start, e.g. no ALSA MIDI in a container, the reason is given plainly, with no advice about the Python version)")
 fresh(ABORT); ok_, msg, pin, pout = fp.MidiSupport.check()
 print("   a library that aborts the process (this test is still running, so the crash stayed in the probe):", ok_, ok(ok_ is False and "code" in msg))

@@ -87,6 +87,13 @@ The screenshots were taken against the simulated radio in this repository.
 - PCM or Opus, with the bridge's own options under Advanced, plus level meters and statistics
   that show where the audio stops if you hear nothing. The status line includes the radio's ALC, and
   says so when your audio is sent but is not reaching the radio.
+- **Audio delay** (the button beside Calibration on the Radio tab, with the same Jitter box on the Audio tab):
+  choppy or dropping out? Raise the **Jitter**, and the audio has more margin against a bumpy network, at the cost
+  of delay; too much delay? Lower it. It changes what you hear at once, while the audio runs, and the line below
+  says how much audio is queued and how many dropouts there were in the last minute. **Buffer** (Low, Medium or
+  High) is the sound device's own buffer: Low is the least delay, High the safest and the default, and a change
+  waits for **Restart audio**. Both settings affect only the audio you hear; the audio you send is buffered by the
+  bridge on the server, which has its own `--jitter` option.
 - A **Copy report** button puts the settings, status and log on the clipboard (IP addresses hidden)
   to paste into a bug report.
 
@@ -253,7 +260,7 @@ nothing while the radio sends dits, the radio's own keyer is answering the line:
 
 ## Status
 
-Version 1.6.0 (see `CHANGELOG.md`).
+Version 1.7.0 (see `CHANGELOG.md`).
 
 Developed against the simulators in this repository, and used by the maintainer with a real FT-991A over
 ser2net from macOS and Linux: the control panel, remote power on and off, push-to-talk, audio in both

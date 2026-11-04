@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.7.0
+
+- **Adjustable audio delay, on the Radio tab.** An **Audio delay** button beside Calibration opens a Jitter slider
+  and a Buffer choice, so that choppy audio or dropouts can be tuned without going to the Audio tab; the controls
+  are hidden until wanted (the window grows about 100 px when they are open).
+  - **Jitter** (20 to 1000 ms) is the receive buffer. It can now be changed **while the audio runs**, and it counts at
+    once: a deeper buffer pauses until it has refilled to the new depth (one short gap), and a shallower one sheds
+    the extra audio immediately (one small glitch). Before, it was fixed when the audio started, and a queue that
+    stood at the old depth would have kept it until the next dropout. The Jitter box on the Audio tab works while
+    audio runs too.
+  - **Buffer** (Low, Medium, High) is the sound device's own buffer, which was never adjustable: the streams were
+    opened with no latency setting, so PortAudio used its High default. High is still the default and is left
+    alone. Low asks for the device's low latency, and Medium for half way between its low and high. It is chosen
+    when the streams open, so a change waits for **Restart audio**, a new button beside it. It applies to the
+    direct routes and to the sound-cable routes.
+  - **A readout** under the controls: how much audio is queued, how many **dropouts in the last minute**, how much
+    was dropped to catch up, and the device buffer PortAudio reports.
+  - These affect only the audio you hear. The audio you send is buffered by the bridge on the server (its
+    `--jitter` option).
+  - The defaults are exactly the previous behaviour (110 ms, High).
+- A saved jitter that is not a number, or out of range, is replaced by 110, or cut to 20 to 1000.
+
 ## 1.6.0
 
 A simplification after testing: the HaliKey MIDI works well, and everything else for the paddles was removed.
