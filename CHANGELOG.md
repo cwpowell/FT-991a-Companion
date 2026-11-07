@@ -1,5 +1,17 @@
 # Changelog
 
+## Bridge 2026-11-07a (`audio-bridge.py`; no new panel release)
+
+- **`--pin-playback PERCENT` pins the radio's playback volume at its own level.** That volume carries the transmit
+  audio, so it sets the transmit drive and the ALC, and it may need to be, say, 45% while everything else stays at
+  100%. Before, `--pin-volumes` used one percentage for the radio's playback and capture volumes and the bridge's own
+  streams, so pinning at 45% would also have attenuated the bridge's playback stream (it multiplies with the sink
+  volume) and the received audio. Now `--pin-volumes 100 --pin-playback 45` keeps the radio's playback at 45% and the
+  rest at 100%; `--pin-playback` alone manages only the radio's playback volume. A volume that is changed, turned up
+  or muted is put back, and each correction is logged, as before.
+- Both options now refuse a percentage outside 1 to 150 (`--pin-volumes 0` still means "leave the volumes alone").
+- The bridge's small graphical window still pins at 100% only.
+
 ## 1.7.0
 
 - **Adjustable audio delay, on the Radio tab.** An **Audio delay** button beside Calibration opens a Jitter slider

@@ -115,7 +115,11 @@ python3 audio-bridge.py server --bind YOUR-TAILSCALE-ADDRESS \
 
 `audio-bridge.service` runs the same thing in the background as a systemd user service. Add
 `--pin-volumes 100` to keep the PulseAudio / PipeWire volumes of the radio's sound card, and of the
-bridge's own streams, from being turned down (every correction is logged).
+bridge's own streams, from being turned down (every correction is logged). The radio's playback volume
+carries your transmit audio, so it sets the transmit drive and the ALC. If it should stand at a different
+level from the rest, add `--pin-playback 45` (45 is only an example): it pins that one volume at its own
+percentage, and `--pin-volumes 100` keeps everything else at 100. Do not use a lower `--pin-volumes` for
+this, because it would also lower the bridge's own streams and the transmit audio would be attenuated twice.
 
 On the operating computer:
 

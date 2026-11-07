@@ -90,7 +90,8 @@ if HAVE_OPUS:
     except Exception:
         pass
 
-__version__ = ("2026-10-26a --pin-volumes keeps PulseAudio volumes up; --wait also recovers when the "
+__version__ = ("2026-11-07a --pin-playback pins the radio's playback volume at its own level (to set the "
+               "transmit drive); 2026-10-26a --pin-volumes keeps PulseAudio volumes up; --wait also recovers when the "
                "audio devices disappear; listen-only (rx_only) option; waits for missing audio "
                "devices; strict-clock pacing, Opus options")
 
@@ -165,9 +166,12 @@ class PulsePinner(threading.Thread):
     only PulseAudio devices (PipeWire included, through its PulseAudio server); it needs the
     pactl command and does nothing, with a note, when that is missing."""
 
-    def __init__(self, node, percent, interval=10.0, log=print):
+    def __init__(self, node, percent, interval=10.0, log=print, playback_percent=None):
         super().__init__(daemon=True, name="pulse-pinner")
         self.percent, self.interval, self.log = int(percent), max(1.0, float(interval)), log
+        # the radio's playback device carries the transmit audio, so its level sets the transmit drive and may
+        # need a different value from the rest (which are kept at percent). 0 for percent: leave the rest alone.
+        self.playback_percent = self.percent if playback_percent is None else int(playback_percent)
         self.sink = self._pulse_name(node.out_dev)      # the radio's playback device (transmit audio)
         self.source = self._pulse_name(node.in_dev)     # the radio's capture device (receive audio)
         self.stop_event = threading.Event()
@@ -204,18 +208,19 @@ class PulsePinner(threading.Thread):
         import re
         return [int(v) for v in re.findall(r"/\s*(\d+)%\s*/", text or "")]
 
-    def _fix(self, what, kind, ident, volume_text, mute_text):
+    def _fix(self, what, kind, ident, volume_text, mute_text, percent=None):
+        percent = self.percent if percent is None else percent
         pcts = self._percents(volume_text)
-        if pcts and min(pcts) != self.percent:
-            self._pactl(f"set-{kind}-volume", ident, f"{self.percent}%")
-            self.log(f"pin-volumes: {what} volume was {min(pcts)}%, set to {self.percent}%")
+        if pcts and min(pcts) != percent:
+            self._pactl(f"set-{kind}-volume", ident, f"{percent}%")
+            self.log(f"pin-volumes: {what} volume was {min(pcts)}%, set to {percent}%")
         if mute_text and "yes" in mute_text.lower():
             self._pactl(f"set-{kind}-mute", ident, "0")
             self.log(f"pin-volumes: {what} was muted, unmuted")
 
-    def _device(self, kind, name, what):
+    def _device(self, kind, name, what, percent=None):
         self._fix(what, kind, name, self._pactl(f"get-{kind}-volume", name),
-                  self._pactl(f"get-{kind}-mute", name))
+                  self._pactl(f"get-{kind}-mute", name), percent)
 
     def _streams(self, kind, header, what):
         """This program's own playback or capture streams, found by process id."""
@@ -233,12 +238,13 @@ class PulsePinner(threading.Thread):
             self._fix(what, kind, ident, vol.group(0) if vol else "", mute.group(0) if mute else "")
 
     def apply(self):
-        if self.sink:
-            self._device("sink", self.sink, "the radio's playback")
-        if self.source:
-            self._device("source", self.source, "the radio's capture")
-        self._streams("sink-input", "Sink Input", "this program's playback stream")
-        self._streams("source-output", "Source Output", "this program's capture stream")
+        if self.sink and self.playback_percent:
+            self._device("sink", self.sink, "the radio's playback", self.playback_percent)
+        if self.percent:                                   # the capture device and this program's own streams
+            if self.source:
+                self._device("source", self.source, "the radio's capture")
+            self._streams("sink-input", "Sink Input", "this program's playback stream")
+            self._streams("source-output", "Source Output", "this program's capture stream")
 
     def run(self):
         if not (self.sink or self.source):
@@ -882,6 +888,11 @@ def main():
                          "this program's own streams, at PERCENT (for example 100) and unmuted, "
                          "checking every --pin-interval seconds and logging each correction. "
                          "0 = leave the volumes alone (default)")
+    ap.add_argument("--pin-playback", type=int, default=None, metavar="PERCENT",
+                    help="PulseAudio / PipeWire: keep the volume of the radio's playback device (the transmit "
+                         "audio, so this sets the transmit drive and the ALC) at PERCENT, for example 45, while "
+                         "--pin-volumes keeps everything else at its own level. Without --pin-volumes only the "
+                         "radio's playback device is managed")
     ap.add_argument("--pin-interval", type=float, default=10.0, metavar="SECONDS",
                     help="how often --pin-volumes checks (default 10)")
     ap.add_argument("--no-pace", action="store_true",
@@ -896,6 +907,10 @@ def main():
     ap.add_argument("--dump-capture", metavar="FILE.wav",
                     help="debug: record the audio captured from the input device")
     a = ap.parse_args()
+    if a.pin_playback is not None and not 1 <= a.pin_playback <= 150:
+        ap.error("--pin-playback must be a percentage from 1 to 150")
+    if not 0 <= a.pin_volumes <= 150:
+        ap.error("--pin-volumes must be a percentage from 1 to 150 (0 leaves the volumes alone)")
 
     if a.mode == "list":
         print(sd.query_devices())
@@ -932,8 +947,9 @@ def main():
             continue
         tries = 0
         pinner = None
-        if a.pin_volumes:
-            pinner = PulsePinner(node, a.pin_volumes, a.pin_interval, log=lambda m: print(m, flush=True))
+        if a.pin_volumes or a.pin_playback:
+            pinner = PulsePinner(node, a.pin_volumes, a.pin_interval, log=lambda m: print(m, flush=True),
+                                 playback_percent=a.pin_playback)
             pinner.start()
         # with --wait, a bridge that is left running also recovers when its devices go away
         # (the radio is switched off) and come back (it is switched on again)
