@@ -264,7 +264,7 @@ nothing while the radio sends dits, the radio's own keyer is answering the line:
 
 ## Status
 
-Version 1.7.0 (see `CHANGELOG.md`).
+Version 1.7.1 (see `CHANGELOG.md`).
 
 Developed against the simulators in this repository, and used by the maintainer with a real FT-991A over
 ser2net from macOS and Linux: the control panel, remote power on and off, push-to-talk, audio in both

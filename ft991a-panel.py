@@ -72,7 +72,7 @@ Meter values come from Hamlib's own calibration tables. If your wattmeter disagr
 "Cal PO" / "Cal SWR" while transmitting into a dummy load to add correction points.
 """
 APP_NAME = "FT-991a Companion"                   # shown in the title bar, --version and the report
-__version__ = "1.7.0"      # shown in the title bar; the installers and the report use it too
+__version__ = "1.7.1"      # shown in the title bar; the installers and the report use it too
 
 import argparse
 import json
@@ -4489,6 +4489,7 @@ class SpectralNR:
         self.win = np.sin(np.pi * (np.arange(self.n) + 0.5) / self.n)
         self.enabled = False       # the on/off switch
         self.muted = False         # while calibrating, the speakers hear nothing
+        self.hold = False          # while the radio transmits: the noise profile is not updated
         self.capture = None        # while calibrating: a list that gets every window's power
         self.calibrated = False
         self.noise = None
@@ -4568,6 +4569,8 @@ class SpectralNR:
             # (from the smoothed power, as the gain is judged against: following the raw power would
             # slowly make the profile spiky, and a steady line would then be cut far too little)
             Pn, Psm = self.noise, self._smooth(P)
+            if self.hold:                  # transmitting: the audio is sidetone or silence, not the
+                return Pn                  # noise, and learning it leaves the profile far too low
             quiet = Psm < 2.5 * Pn
             self.noise = np.where(quiet, 0.995 * Pn + 0.005 * Psm, Pn)
             return self.noise
@@ -6225,6 +6228,26 @@ class Panel:
                     "noise by itself).")
         self.nr_status.set(text)
 
+    NR_HOLD_AFTER = 1.5        # seconds after transmitting before the noise profile adapts again
+
+    def nr_hold_update(self, snap):
+        """Keep the noise profile from learning while the radio transmits (PTT, Tune, CW keying).
+        Called from the audio status tick; a hold lasts NR_HOLD_AFTER seconds past the last sign."""
+        nr = self.nr
+        if nr is None:
+            return
+        now = time.time()
+        kb = getattr(getattr(self, "cw_window", None), "kb", None)
+        tx = bool(snap.get("ptt") or self.ptt_down or snap.get("tuning") or self.tune_deadline)
+        if kb is not None:
+            try:
+                tx = tx or kb.sender.recently(1.0) or bool(kb.link.waiting)
+            except Exception:
+                pass
+        if tx:
+            self._nr_tx_until = now + self.NR_HOLD_AFTER
+        nr.hold = now < getattr(self, "_nr_tx_until", 0.0)
+
     def audio_stop(self):
         if self.nr_cal.active:
             self.nr_cal.abort("the audio was stopped")
@@ -6363,6 +6386,7 @@ class Panel:
                 dg["spk"] = max(dg["spk"], p)
         td = self.a_txdiag
         snap = self.radio.snapshot()
+        self.nr_hold_update(snap)
         if snap.get("ptt"):                               # the radio's ALC shows audio reaching it
             td["tx"] += 1
             td["alc"] = max(td["alc"], self.alc_fraction(snap, self.radio.units == "raw"))

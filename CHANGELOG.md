@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.1
+
+- **Noise reduction now recovers at once after CW (and PTT, Tune) transmitting.** After calibration the noise profile
+  keeps following slow changes, but while the radio transmitted it was learning the transmit-time audio (silence or
+  sidetone), so it decayed far below the real noise, and it could not climb back because it only learns from bins that
+  are already close to it. Receive then sounded noisy until you calibrated again. The profile is now frozen while PTT,
+  Tune, CW keying or CW text sending is active, and for 1.5 s afterwards. New test: `tests/test-nr-hold.py`.
+
 ## Bridge 2026-11-07a (`audio-bridge.py`; no new panel release)
 
 - **`--pin-playback PERCENT` pins the radio's playback volume at its own level.** That volume carries the transmit
