@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version number (leave empty to use the one in ft991a_panel.py)"
+        description: "Version number (leave empty to use the one in ft991a-panel.py)"
         required: false
         default: ""
       commit_files:
@@ -48,12 +48,12 @@ jobs:
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
           V="${V#v}"
           if [ -n "$V" ] && [ "$V" != "$S" ]; then
-            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
+            echo "::error::The version asked for ($V) is not the one in ft991a-panel.py ($S). Leave the Version box empty, or change __version__ in ft991a-panel.py first."
             exit 1
           fi
           echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
       - name: Build the app and the disk image
-        run: bash packaging/build_macos.sh
+        run: bash packaging/build-macos.sh
       - name: Self-test report
         if: always()
         run: cat "build/selftest-${{ matrix.label }}.txt" || true
@@ -79,7 +79,7 @@ jobs:
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
           V="${V#v}"
           if [ -n "$V" ] && [ "$V" != "$S" ]; then
-            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
+            echo "::error::The version asked for ($V) is not the one in ft991a-panel.py ($S). Leave the Version box empty, or change __version__ in ft991a-panel.py first."
             exit 1
           fi
           echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
@@ -88,7 +88,7 @@ jobs:
         run: choco install innosetup --yes --no-progress
       - name: Build the program and the installer
         shell: cmd
-        run: packaging\build_windows.bat
+        run: packaging\build-windows.bat
       - name: Self-test report
         if: always()
         shell: bash
@@ -116,7 +116,7 @@ jobs:
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
           V="${V#v}"
           if [ -n "$V" ] && [ "$V" != "$S" ]; then
-            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
+            echo "::error::The version asked for ($V) is not the one in ft991a-panel.py ($S). Leave the Version box empty, or change __version__ in ft991a-panel.py first."
             exit 1
           fi
           echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
