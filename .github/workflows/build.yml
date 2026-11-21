@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version number (leave empty to use the one in ft991a-panel.py)"
+        description: "Version number (leave empty to use the one in ft991a_panel.py)"
         required: false
         default: ""
       commit_files:
@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14            # Apple Silicon
+          - os: macos-15            # Apple Silicon (macos-14 was retired 2 Nov 2026)
             label: apple-silicon
           - os: macos-15-intel      # Intel (GitHub retires Intel Mac runners in fall 2027)
             label: intel
@@ -48,12 +48,12 @@ jobs:
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
           V="${V#v}"
           if [ -n "$V" ] && [ "$V" != "$S" ]; then
-            echo "::error::The version asked for ($V) is not the one in ft991a-panel.py ($S). Leave the Version box empty, or change __version__ in ft991a-panel.py first."
+            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
             exit 1
           fi
           echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
       - name: Build the app and the disk image
-        run: bash packaging/build-macos.sh
+        run: bash packaging/build_macos.sh
       - name: Self-test report
         if: always()
         run: cat "build/selftest-${{ matrix.label }}.txt" || true
@@ -79,7 +79,7 @@ jobs:
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
           V="${V#v}"
           if [ -n "$V" ] && [ "$V" != "$S" ]; then
-            echo "::error::The version asked for ($V) is not the one in ft991a-panel.py ($S). Leave the Version box empty, or change __version__ in ft991a-panel.py first."
+            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
             exit 1
           fi
           echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
@@ -88,7 +88,7 @@ jobs:
         run: choco install innosetup --yes --no-progress
       - name: Build the program and the installer
         shell: cmd
-        run: packaging\build-windows.bat
+        run: packaging\build_windows.bat
       - name: Self-test report
         if: always()
         shell: bash
@@ -116,7 +116,7 @@ jobs:
           if [ -z "$V" ] && [ "${{ github.ref_type }}" = "tag" ]; then V="${{ github.ref_name }}"; fi
           V="${V#v}"
           if [ -n "$V" ] && [ "$V" != "$S" ]; then
-            echo "::error::The version asked for ($V) is not the one in ft991a-panel.py ($S). Leave the Version box empty, or change __version__ in ft991a-panel.py first."
+            echo "::error::The version asked for ($V) is not the one in ft991a_panel.py ($S). Leave the Version box empty, or change __version__ in ft991a_panel.py first."
             exit 1
           fi
           echo "PANEL_VERSION=$S" >> "$GITHUB_ENV"
@@ -145,8 +145,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v$PANEL_VERSION"
-          # --target pins the tag to the commit that was built, even if main moves on before you publish
-          gh release create "$TAG" artifacts/* --draft --target "$GITHUB_SHA" \
+          gh release create "$TAG" artifacts/* --draft \
             --title "FT-991A Panel $PANEL_VERSION" \
-            --notes "Installers for macOS (Apple Silicon and Intel) and Windows. FT-991A Companion is free software under the GNU General Public License, version 3 or later. The licence is inside each installer, and the source of this version is this repository at this release's tag." \
+            --notes "Installers for macOS (Apple Silicon and Intel) and Windows." \
             || gh release upload "$TAG" artifacts/* --clobber

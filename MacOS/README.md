@@ -41,7 +41,7 @@ The first time you start the audio, macOS asks whether the app may use the micro
 - **BlackHole is not included.** You only need it if you want virtual audio cables (for example to
   share the audio with FreeDV). Install it from https://existential.audio/blackhole/ . Without it,
   choose "(direct)" for the radio ends of the Audio tab.
-- The images are built on macOS 14 (Apple Silicon) and macOS 15 (Intel). Older macOS versions may
+- The images are built on macOS 15 (Apple Silicon) and macOS 15 (Intel). Older macOS versions may
   not run them.
 - GitHub is retiring its Intel Mac build machines in fall 2027. After that only the Apple Silicon
   image can be rebuilt automatically.
